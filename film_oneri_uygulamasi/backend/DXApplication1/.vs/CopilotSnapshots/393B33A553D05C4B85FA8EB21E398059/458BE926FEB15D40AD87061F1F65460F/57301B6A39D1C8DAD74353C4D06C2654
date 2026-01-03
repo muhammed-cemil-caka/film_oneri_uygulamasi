@@ -1,0 +1,72 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        public Form1()
+        {
+            InitializeComponent();
+
+        }
+
+
+        private async void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+
+                // On startup, automatically fetch IMDb ratings for any movies with rating = 0.0
+                try
+                {
+                    // Run on background thread to avoid blocking UI
+                    var updated = await System.Threading.Tasks.Task.Run(() => DatabaseHelper.Instance.UpdateRatingsFromOmdb());
+                    if (updated > 0)
+                    {
+                        // Refresh grid
+                        var newDt = DatabaseHelper.Instance.GetMovies();
+                        this.gridControl1.DataSource = newDt;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // don't interrupt startup; show a warning
+                    XtraMessageBox.Show($"Otomatik puan güncellemesi sırasında hata: {ex.Message}", "Uyarı", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            var error = DatabaseHelper.Instance.TestConnection();
+            if (error == null)
+            {
+                XtraMessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                XtraMessageBox.Show($"Bağlantı hatası:\n{error}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Manual update/progress UI removed
+    }
+}

@@ -1,0 +1,327 @@
+﻿using System;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Windows.Forms;
+using DevExpress.XtraEditors;
+using DevExpress.XtraGrid.Views.Tile;
+using DevExpress.XtraGrid.Columns;
+using DevExpress.Utils;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        // Star images
+        private Bitmap _emptyStar;
+        private Bitmap _filledStar;
+        private DevExpress.XtraEditors.SimpleButton _btnBackFavorites;
+
+        // state
+        private int _hoveredTileRow = -999;
+        private int? _lastRecommendedId = null;
+        private System.Collections.Generic.HashSet<int> _top5Ids = new System.Collections.Generic.HashSet<int>();
+
+        public Form1()
+        {
+            InitializeComponent();
+            try { this.WindowState = FormWindowState.Maximized; } catch { }
+            this.KeyPreview = true;
+            this.KeyDown += Form1_KeyDown;
+
+            try { gridControl1.Dock = DockStyle.Fill; } catch { }
+
+            EnsureStarImages();
+            SetupTileView();
+
+            // wire hover
+            try
+            {
+                gridControl1.MouseMove += GridControl1_MouseMove_ForTileHover;
+                gridControl1.MouseLeave += GridControl1_MouseLeave_ForTileHover;
+            }
+            catch { }
+
+            LoadData();
+        }
+
+        private void LoadData()
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+                UpdateTop5FromDataSource();
+
+                // genres
+                try
+                {
+                    if (comboBoxGenres.Items.Count <= 1)
+                    {
+                        comboBoxGenres.Items.Clear();
+                        comboBoxGenres.Items.Add("Hepsi");
+                        foreach (var g in DatabaseHelper.Instance.GetDistinctGenres()) comboBoxGenres.Items.Add(g);
+                        comboBoxGenres.SelectedIndex = 0;
+                    }
+                }
+                catch { }
+
+                try { gridControl1.MainView = tileView1; gridControl1.ForceInitialize(); } catch { }
+                try { tileView1.RefreshData(); } catch { }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ConfigureGrid(DataTable dt)
+        {
+            try
+            {
+                var gv = this.gridView1;
+                gv.Columns.Clear();
+
+                var colNo = gv.Columns.AddVisible("row_no", "ID");
+                colNo.UnboundType = DevExpress.Data.UnboundColumnType.Integer;
+                colNo.OptionsColumn.AllowEdit = false;
+                colNo.Width = 45;
+
+                var colId = gv.Columns.AddVisible("id", "id"); colId.Visible = false;
+                var colName = gv.Columns.AddVisible("movie_name", "FİLM ADI"); colName.OptionsColumn.AllowEdit = false; colName.Width = 400;
+                var colGenre = gv.Columns.AddVisible("genre", "TÜR"); colGenre.OptionsColumn.AllowEdit = false; colGenre.Width = 150;
+                var colRating = gv.Columns.AddVisible("rating", "PUAN"); colRating.OptionsColumn.AllowEdit = false; colRating.Width = 80;
+
+                if (gv.Columns["is_favorite"] == null)
+                {
+                    var colFav = gv.Columns.AddVisible("is_favorite", "Favori");
+                    EnsureStarImages();
+                    var repo = new DevExpress.XtraEditors.Repository.RepositoryItemImageComboBox();
+                    var imgs = new System.Windows.Forms.ImageList(); imgs.ImageSize = new Size(16, 16); imgs.Images.Add(_emptyStar); imgs.Images.Add(_filledStar);
+                    repo.SmallImages = imgs;
+                    repo.Items.Add(new DevExpress.XtraEditors.Controls.ImageComboBoxItem("", false, 0));
+                    repo.Items.Add(new DevExpress.XtraEditors.Controls.ImageComboBoxItem("", true, 1));
+                    repo.TextEditStyle = DevExpress.XtraEditors.Controls.TextEditStyles.HideTextEditor;
+                    colFav.ColumnEdit = repo;
+                    colFav.OptionsColumn.AllowEdit = false;
+                    colFav.Width = 60;
+                }
+
+                gv.OptionsView.ShowIndicator = false;
+                gv.OptionsView.ColumnAutoWidth = false;
+
+                gv.RowCellClick -= GridView_RowCellClick; gv.RowCellClick += GridView_RowCellClick;
+                gv.CustomDrawCell -= Gv_CustomDrawCell; gv.CustomDrawCell += Gv_CustomDrawCell;
+                gv.CustomUnboundColumnData -= gridView1_CustomUnboundColumnData; gv.CustomUnboundColumnData += gridView1_CustomUnboundColumnData;
+                gv.RowStyle -= Gv_RowStyle; gv.RowStyle += Gv_RowStyle;
+            }
+            catch { }
+        }
+
+        private void gridView1_CustomUnboundColumnData(object sender, DevExpress.XtraGrid.Views.Base.CustomColumnDataEventArgs e)
+        {
+            try { if (e.Column.FieldName == "row_no" && e.IsGetData) e.Value = e.ListSourceRowIndex + 1; } catch { }
+        }
+
+        private void SetupTileView()
+        {
+            try
+            {
+                var tile = this.tileView1; if (tile == null) return;
+                tile.TileTemplate.Clear();
+                tile.OptionsTiles.ItemSize = new Size(250, 150);
+                tile.OptionsTiles.RowCount = 0;
+                try { tile.OptionsTiles.Orientation = DevExpress.XtraEditors.TileControlOrientation.Vertical; } catch { }
+
+                tile.Columns.Clear();
+                var colId = tile.Columns.AddField("id"); colId.Visible = false;
+                var colName = tile.Columns.AddField("movie_name"); colName.Visible = true; colName.Caption = "Film Adı";
+                var colRating = tile.Columns.AddField("rating"); colRating.Visible = false;
+                var colFav = tile.Columns.AddField("is_favorite"); colFav.Visible = false;
+                var colPlot = tile.Columns.AddField("plot"); colPlot.Visible = false;
+
+                var title = new TileViewItemElement { Column = colName, Text = "[movie_name]" };
+                title.TextAlignment = TileItemContentAlignment.MiddleCenter;
+                title.Appearance.Normal.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+                title.RowIndex = 0; title.TextLocation = new Point(0, 8);
+
+                var ratingElem = new TileViewItemElement { Column = colRating };
+                ratingElem.TextAlignment = TileItemContentAlignment.MiddleCenter; ratingElem.RowIndex = 1; ratingElem.TextLocation = new Point(0, 6);
+
+                var favElem = new TileViewItemElement { Column = colFav };
+                favElem.TextAlignment = TileItemContentAlignment.TopRight; favElem.RowIndex = 0; favElem.TextLocation = new Point(-8, 6);
+
+                tile.TileTemplate.Add(title); tile.TileTemplate.Add(ratingElem); tile.TileTemplate.Add(favElem);
+
+                tile.OptionsTiles.AllowPressAnimation = true;
+                tile.ItemCustomize -= Tile_ItemCustomize; tile.ItemCustomize += Tile_ItemCustomize;
+                tile.ItemClick -= Tile_ItemClick; tile.ItemClick += Tile_ItemClick;
+            }
+            catch { }
+        }
+
+        private void Tile_ItemCustomize(object sender, TileViewItemCustomizeEventArgs e)
+        {
+            try
+            {
+                var view = sender as TileView; if (view == null) return;
+                double rating = 0.0; try { rating = Convert.ToDouble(view.GetRowCellValue(e.RowHandle, "rating") ?? 0.0); } catch { }
+                foreach (var elem in e.Item.Elements.OfType<TileViewItemElement>())
+                {
+                    try
+                    {
+                        if (elem.Column != null && string.Equals(elem.Column.FieldName, "movie_name", StringComparison.OrdinalIgnoreCase))
+                        {
+                            elem.Text = Convert.ToString(view.GetRowCellValue(e.RowHandle, "movie_name")) ?? string.Empty;
+                            elem.Appearance.Normal.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+                            elem.Appearance.Normal.ForeColor = Color.FromArgb(34, 34, 34);
+                            elem.TextAlignment = TileItemContentAlignment.MiddleCenter;
+                        }
+                        else if (elem.RowIndex == 1)
+                        {
+                            elem.Text = $"⭐ {rating:0.0}";
+                            elem.Appearance.Normal.ForeColor = Color.FromArgb(80, 80, 80);
+                            elem.TextAlignment = TileItemContentAlignment.MiddleCenter;
+                        }
+                        else if (elem.Column != null && string.Equals(elem.Column.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var favVal = view.GetRowCellValue(e.RowHandle, "is_favorite"); bool fav = false; try { fav = Convert.ToBoolean(favVal); } catch { fav = false; }
+                            elem.Text = fav ? "★" : "☆";
+                            elem.Appearance.Normal.ForeColor = fav ? Color.FromArgb(255, 193, 7) : Color.FromArgb(160, 160, 160);
+                            elem.TextAlignment = TileItemContentAlignment.TopRight; elem.TextLocation = new Point(-8, 6);
+                        }
+                    }
+                    catch { }
+                }
+                try { if (rating >= 8.5) e.Item.Appearance.BackColor = Color.FromArgb(235, 248, 236); else if (rating >= 7.0) e.Item.Appearance.BackColor = Color.FromArgb(255, 252, 230); else e.Item.Appearance.BackColor = Color.FromArgb(255, 241, 243); } catch { }
+            }
+            catch { }
+        }
+
+        private void Tile_ItemClick(object sender, TileViewItemClickEventArgs e)
+        {
+            try
+            {
+                var view = sender as TileView; if (view == null) return; int handle = e.Item.RowHandle; if (handle < 0) return;
+                var pt = gridControl1.PointToClient(Cursor.Position); object hi = null; try { hi = view.CalcHitInfo(pt); } catch { hi = null; }
+                bool starClicked = false;
+                try
+                {
+                    if (hi != null)
+                    {
+                        var prop = hi.GetType().GetProperty("Element");
+                        if (prop != null)
+                        {
+                            var elemObj = prop.GetValue(hi);
+                            if (elemObj != null && elemObj.GetType().Name.Contains("TileViewItemElement"))
+                            {
+                                var colProp = elemObj.GetType().GetProperty("Column");
+                                if (colProp != null)
+                                {
+                                    var col = colProp.GetValue(elemObj) as GridColumn;
+                                    if (col != null && string.Equals(col.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase)) starClicked = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+                if (starClicked) { var idObj = view.GetRowCellValue(handle, "id"); if (idObj == null || idObj == DBNull.Value) return; int id = Convert.ToInt32(idObj); var favVal = view.GetRowCellValue(handle, "is_favorite"); bool fav = false; try { fav = Convert.ToBoolean(favVal); } catch { fav = false; } var ok = DatabaseHelper.Instance.UpdateFavoriteStatus(id, !fav); if (ok) LoadData(); return; }
+                try { var name = Convert.ToString(view.GetRowCellValue(handle, "movie_name")) ?? string.Empty; var plot = Convert.ToString(view.GetRowCellValue(handle, "plot")) ?? string.Empty; ShowMovieFlyout(handle, name, plot, Convert.ToBoolean(view.GetRowCellValue(handle, "is_favorite") ?? false)); } catch { }
+            }
+            catch { }
+        }
+
+        private void ShowMovieFlyout(int rowHandle, string name, string plot, bool isFav)
+        {
+            try
+            {
+                var dlg = new DevExpress.XtraEditors.XtraForm(); dlg.Text = name; dlg.StartPosition = FormStartPosition.CenterParent; dlg.Width = 560; dlg.Height = 360;
+                var lblHeader = new DevExpress.XtraEditors.LabelControl(); lblHeader.Text = name; lblHeader.Appearance.Font = new Font("Segoe UI", 12F, FontStyle.Bold); lblHeader.Dock = DockStyle.Top; lblHeader.Height = 40;
+                var txt = new DevExpress.XtraEditors.MemoEdit(); txt.Text = string.IsNullOrWhiteSpace(plot) ? "(Açıklama yok)" : plot; txt.Dock = DockStyle.Fill; txt.Properties.ReadOnly = true;
+                dlg.Controls.Add(txt); dlg.Controls.Add(lblHeader); dlg.ShowDialog(this);
+            }
+            catch { }
+        }
+
+        private void GridControl1_MouseLeave_ForTileHover(object? sender, EventArgs e)
+        {
+            try { if (_hoveredTileRow != -999) { var prev = _hoveredTileRow; _hoveredTileRow = -999; try { tileView1.RefreshRow(prev); } catch { } } } catch { }
+        }
+        private void GridControl1_MouseMove_ForTileHover(object? sender, MouseEventArgs e)
+        {
+            try { var tile = this.tileView1; var pt = this.gridControl1.PointToClient(Cursor.Position); object hi = null; try { hi = tile.CalcHitInfo(pt); } catch { hi = null; } int row = -1; try { if (hi != null) { var prop = hi.GetType().GetProperty("RowHandle"); if (prop != null) row = (int)prop.GetValue(hi); } } catch { row = -1; } if (row != _hoveredTileRow) { var prev = _hoveredTileRow; _hoveredTileRow = row; if (prev >= 0) try { tile.RefreshRow(prev); } catch { } if (_hoveredTileRow >= 0) try { tile.RefreshRow(_hoveredTileRow); } catch { } } } catch { }
+
+        private void Gv_CustomDrawCell(object sender, DevExpress.XtraGrid.Views.Base.RowCellCustomDrawEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null || e.Column.FieldName != "is_favorite") return;
+                EnsureStarImages();
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView; if (view == null) return;
+                object val = view.GetRowCellValue(e.RowHandle, e.Column); bool isFav = false; try { if (val != null && val != DBNull.Value) isFav = Convert.ToBoolean(val); } catch { isFav = false; }
+                var img = isFav ? _filledStar : _emptyStar; if (img != null) { e.Appearance.DrawBackground(e.Cache, e.Bounds); int x = e.Bounds.Left + (e.Bounds.Width - img.Width) / 2; int y = e.Bounds.Top + (e.Bounds.Height - img.Height) / 2; e.Graphics.DrawImage(img, new Rectangle(x, y, img.Width, img.Height)); e.Handled = true; }
+            }
+            catch { }
+        }
+
+        private void GridView_RowCellClick(object sender, DevExpress.XtraGrid.Views.Grid.RowCellClickEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null || e.Column.FieldName != "is_favorite") return;
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView; if (view == null) return; var row = view.GetDataRow(e.RowHandle); if (row == null) return; if (!row.Table.Columns.Contains("id") || row.IsNull("id")) return; int id = Convert.ToInt32(row["id"]); bool current = false; try { current = Convert.ToBoolean(row["is_favorite"]); } catch { } var ok = DatabaseHelper.Instance.UpdateFavoriteStatus(id, !current); if (ok) { row["is_favorite"] = !current; view.RefreshRow(e.RowHandle); UpdateTop5FromDataSource(); }
+            }
+            catch { }
+        }
+
+        private void UpdateTop5FromDataSource()
+        {
+            try
+            {
+                _top5Ids.Clear(); var dt = this.gridControl1.DataSource as DataTable; if (dt == null || dt.Rows.Count == 0) return; var rows = dt.AsEnumerable().OrderByDescending(r => r.Field<double?>("rating") ?? 0.0).ThenBy(r => r.Field<string>("movie_name")).Take(5); foreach (var r in rows) { if (dt.Columns.Contains("id") && !r.IsNull("id")) try { _top5Ids.Add(Convert.ToInt32(r["id"])); } catch { } } try { tileView1.RefreshData(); } catch { }
+            }
+            catch { }
+        }
+
+        private void EnsureStarImages()
+        {
+            if (_emptyStar != null && _filledStar != null) return; _emptyStar = new Bitmap(16, 16); using (var g = Graphics.FromImage(_emptyStar)) { g.Clear(Color.Transparent); using var pen = new Pen(Color.FromArgb(140, 140, 140), 1.5f); var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) }; g.DrawPolygon(pen, pts); } _filledStar = new Bitmap(16, 16); using (var g = Graphics.FromImage(_filledStar)) { g.Clear(Color.Transparent); using var brush = new SolidBrush(Color.FromArgb(255, 193, 7)); var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) }; g.FillPolygon(brush, pts); using var pen = new Pen(Color.FromArgb(120, 90, 0), 0.8f); g.DrawPolygon(pen, pts); }
+        }
+
+        private void Form1_KeyDown(object sender, KeyEventArgs e)
+        {
+            try { if (e.KeyCode == Keys.Escape) this.Close(); } catch { }
+        }
+
+        private void ComboBoxGenres_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi") { LoadData(); return; }
+                var dt = DatabaseHelper.Instance.GetMoviesByGenre(sel);
+                gridControl1.DataSource = dt; ConfigureGrid(dt); UpdateTop5FromDataSource(); try { tileView1.RefreshData(); } catch { }
+            }
+            catch { }
+        }
+
+        private void BtnRecommend_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi") { XtraMessageBox.Show("Lütfen önce bir tür seçin.", "Bilgi"); return; }
+                var movie = DatabaseHelper.Instance.GetRandomMovieByGenre(sel, _lastRecommendedId);
+                if (movie == null) { XtraMessageBox.Show("Seçilen türe ait film bulunamadı.", "Bilgi"); return; }
+                _lastRecommendedId = movie.Value.id;
+                XtraMessageBox.Show($"Öneri: {movie.Value.name}\n⭐ {movie.Value.rating:0.0}", "Film Önerisi");
+            }
+            catch { }
+        }
+
+        private void BtnFavorites_Click(object sender, EventArgs e) { try { var dt = DatabaseHelper.Instance.GetFavoriteMovies(); gridControl1.DataSource = dt; ConfigureGrid(dt); UpdateTop5FromDataSource(); } catch { } }
+        private void BtnBackFavorites_Click(object sender, EventArgs e) { LoadData(); }
+    }
+}

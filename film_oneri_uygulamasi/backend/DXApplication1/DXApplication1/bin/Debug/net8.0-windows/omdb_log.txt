@@ -1,0 +1,42 @@
+2025-12-31T01:30:37 Trying direct title: WALL-E year:2008
+2025-12-31T01:30:37 Direct result: 8.4 
+2025-12-31T01:30:37 Trying direct title: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:30:38 Direct result: null 
+2025-12-31T01:30:38 Trying search fallback: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:30:38 Search result: null 
+2025-12-31T01:30:38 All attempts failed for title: Indiana Jones and the Raiders of the Lost Ark
+2025-12-31T01:30:38 Trying direct title: Streetcar Named Desire year:1951
+2025-12-31T01:30:38 Direct result: 7.9 
+2025-12-31T01:30:42 Trying direct title: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:30:43 Direct result: null 
+2025-12-31T01:30:43 Trying search fallback: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:30:43 Search result: null 
+2025-12-31T01:30:43 All attempts failed for title: Indiana Jones and the Raiders of the Lost Ark
+2025-12-31T01:31:20 Trying direct title: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:31:20 Direct result: null 
+2025-12-31T01:31:20 Trying search fallback: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:31:20 Search result: null 
+2025-12-31T01:31:20 All attempts failed for title: Indiana Jones and the Raiders of the Lost Ark
+2025-12-31T01:35:54 Trying direct title: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:35:55 Direct result: null 
+2025-12-31T01:35:55 Trying search fallback: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:35:55 Search result: null 
+2025-12-31T01:35:55 All attempts failed for title: Indiana Jones and the Raiders of the Lost Ark
+2025-12-31T01:39:28 Trying direct title: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:39:29 Direct result: null 
+2025-12-31T01:39:29 Trying search fallback: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:39:29 Search result: null 
+2025-12-31T01:39:29 All attempts failed for title: Indiana Jones and the Raiders of the Lost Ark
+2025-12-31T01:39:38 Trying direct title: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:39:38 Direct result: null 
+2025-12-31T01:39:38 Trying search fallback: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:39:38 Search result: null 
+2025-12-31T01:39:38 All attempts failed for title: Indiana Jones and the Raiders of the Lost Ark
+2025-12-31T01:55:29 Trying direct title: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:55:29 Direct result: null 
+2025-12-31T01:55:29 Trying search fallback: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T01:55:29 Search result: null 
+2025-12-31T01:55:29 All attempts failed for title: Indiana Jones and the Raiders of the Lost Ark
+2025-12-31T15:10:06 Starting fallback for: Indiana Jones and the Raiders of the Lost Ark year:1981
+2025-12-31T15:10:06 Trying franchise title: Raiders of the Lost Ark
+2025-12-31T15:10:07 Franchise direct result for Raiders of the Lost Ark: 8.4 

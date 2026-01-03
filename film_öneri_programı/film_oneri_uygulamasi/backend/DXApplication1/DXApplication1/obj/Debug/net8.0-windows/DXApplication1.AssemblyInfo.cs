@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("DXApplication1")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c28b5eeeb29521181d6d1623442de8abde0b0cfc")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5c29f1fee0c97362ceea28cbd6fc8d7efa54693f")]
 [assembly: System.Reflection.AssemblyProductAttribute("DXApplication1")]
 [assembly: System.Reflection.AssemblyTitleAttribute("DXApplication1")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

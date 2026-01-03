@@ -1,0 +1,243 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        public Form1()
+        {
+            InitializeComponent();
+            // Make the grid fill the form
+            gridControl1.Dock = System.Windows.Forms.DockStyle.Fill;
+
+            // Configure indicator / group panel
+            gridView1.OptionsView.ShowIndicator = false; // we use an explicit unbound id column instead
+            gridView1.IndicatorWidth = 40;
+            gridView1.OptionsView.ShowGroupPanel = false;
+
+            // 2. Veri yüklendiğinde gerçek ID sütununu gizle ve Indicator'a ID yaz
+            gridControl1.DataSourceChanged += (s, e) => {
+                if (gridView1.Columns.Count > 0)
+                {
+                    // Gerçek 'id' sütununu gizle (zaten Indicator'da göstereceğiz)
+                    if (gridView1.Columns["id"] != null) gridView1.Columns["id"].Visible = false;
+
+                    // Diğer sütunları Türkçeleştir
+                    if (gridView1.Columns["movie_name"] != null) gridView1.Columns["movie_name"].Caption = "Film Adı";
+                    if (gridView1.Columns["genre"] != null) gridView1.Columns["genre"].Caption = "Tür";
+                    if (gridView1.Columns["rating"] != null) gridView1.Columns["rating"].Caption = "Puan";
+                }
+            };
+
+            // 3. O sol taraftaki boşluğa (Indicator) ID numaralarını yazdıran sihirli kod
+            gridView1.CustomDrawRowIndicator += (s, e) => {
+                if (e.Info.IsRowIndicator && e.RowHandle >= 0)
+                {
+                    e.Info.DisplayText = (e.RowHandle + 1).ToString(); // 1, 2, 3 diye numara verir
+                }
+            };
+        }
+
+        private void gridView1_CustomUnboundColumnData(object sender, DevExpress.XtraGrid.Views.Base.CustomColumnDataEventArgs e)
+        {
+            if (e.Column.FieldName == "row_no" && e.IsGetData)
+            {
+                // RowHandle may include group rows; use GetRowHandle
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view != null)
+                {
+                    int visibleIndex = view.GetRowHandle(e.ListSourceRowIndex);
+                    // visibleIndex may be negative for new items; fall back
+                    e.Value = e.ListSourceRowIndex + 1;
+                }
+            }
+        }
+
+        // legacy fetch handler removed
+
+
+        private async void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+
+                // Populate genres combo (async-safe)
+                try
+                {
+                    var genres = DatabaseHelper.Instance.GetDistinctGenres();
+                    comboBoxGenres.Items.Clear();
+                    comboBoxGenres.Items.Add("Hepsi");
+                    foreach (var g in genres) comboBoxGenres.Items.Add(g);
+                    comboBoxGenres.SelectedIndex = 0;
+                }
+                catch { }
+
+                // On startup, automatically fetch IMDb ratings for any movies with rating = 0.0
+                try
+                {
+                    // Run on background thread to avoid blocking UI
+                    var updated = await System.Threading.Tasks.Task.Run(() => DatabaseHelper.Instance.UpdateRatingsFromOmdb());
+                    if (updated > 0)
+                    {
+                        // Refresh grid
+                        var newDt = DatabaseHelper.Instance.GetMovies();
+                        this.gridControl1.DataSource = newDt;
+                        ConfigureGrid(newDt);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // don't interrupt startup; show a warning
+                    XtraMessageBox.Show($"Otomatik puan güncellemesi sırasında hata: {ex.Message}", "Uyarı", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ConfigureGrid(DataTable dt)
+        {
+            try
+            {
+                var gv = this.gridView1;
+                gv.Columns.Clear();
+
+                // Ensure we don't attach the handler multiple times
+                gv.CustomUnboundColumnData -= gridView1_CustomUnboundColumnData;
+                gv.CustomUnboundColumnData += gridView1_CustomUnboundColumnData;
+
+                // Add a stable, continuous row number column (unbound) used as visible id
+                var colNo = gv.Columns.AddVisible("row_no", "ID");
+                colNo.UnboundType = DevExpress.Data.UnboundColumnType.Integer;
+                colNo.OptionsColumn.AllowEdit = false;
+                colNo.Width = 35; // ensure numbers are visible (avoid ellipsis)
+                colNo.MinWidth = 30;
+                colNo.AppearanceCell.TextOptions.Trimming = System.Drawing.StringTrimming.None;
+                colNo.AppearanceCell.TextOptions.VAlignment = DevExpress.Utils.VertAlignment.Center;
+                colNo.AppearanceCell.Options.UseTextOptions = true;
+                colNo.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colNo.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colNo.AppearanceCell.ForeColor = Color.Black;
+                colNo.AppearanceHeader.ForeColor = Color.Black;
+                colNo.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colNo.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+                colNo.VisibleIndex = 0;
+
+                // Remove any real DB id column if present
+                if (gv.Columns["id"] != null && gv.Columns["id"].FieldName == "id")
+                {
+                    // If a DB id column exists, remove it so unbound id is shown
+                    gv.Columns.Remove(gv.Columns["id"]);
+                }
+
+                // movie_name column
+                var colName = gv.Columns.AddVisible("movie_name", "FİLM ADI");
+                colName.OptionsColumn.AllowEdit = false;
+                colName.Width = 700; // make wide so titles fit
+                colName.AppearanceCell.ForeColor = Color.Black;
+                colName.AppearanceHeader.ForeColor = Color.Black;
+                colName.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colName.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+                colName.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Near;
+                colName.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+
+                // genre - expanded
+                var colGenre = gv.Columns.AddVisible("genre", "TÜR");
+                colGenre.OptionsColumn.AllowEdit = false;
+                colGenre.Width = 400; // widen genre column per request
+                colGenre.AppearanceCell.ForeColor = Color.Black;
+                colGenre.AppearanceHeader.ForeColor = Color.Black;
+                colGenre.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colGenre.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+                colGenre.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colGenre.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+
+                // rating - center alignment
+                var colRating = gv.Columns.AddVisible("rating", "PUAN");
+                colRating.OptionsColumn.AllowEdit = false;
+                colRating.Width = 80;
+                colRating.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colRating.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colRating.AppearanceCell.ForeColor = Color.Black;
+                colRating.AppearanceHeader.ForeColor = Color.Black;
+                colRating.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colRating.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+
+                // Configure view: use explicit widths and make grid fill the available area
+                gv.OptionsView.ShowIndicator = false;
+                gv.OptionsView.ColumnAutoWidth = false;
+
+                // Optionally adjust column widths to fit current container
+                // (removed automatic BestFit to preserve explicit widths)
+            }
+            catch { /* ignore grid config errors */ }
+        }
+
+        // Handle genre selection change: filter movies by genre and sort by rating desc
+        private void ComboBoxGenres_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi")
+                {
+                    this.gridControl1.DataSource = DatabaseHelper.Instance.GetMovies();
+                    ConfigureGrid((DataTable)this.gridControl1.DataSource);
+                    return;
+                }
+
+                // Query DB for movies that contain the selected genre (case-insensitive)
+                var dt = new DataTable();
+                using (var conn = new NpgsqlConnection(DatabaseHelper.Instance.TestConnection() == null ? "Host=localhost;Port=5432;Username=postgres;Database=film_db" : "Host=localhost;Port=5432;Username=postgres;Database=film_db"))
+                {
+                    using var cmd = new NpgsqlCommand("SELECT id, movie_name, genre, COALESCE(rating,0.0) AS rating FROM movies WHERE genre ILIKE @g ORDER BY rating DESC", conn);
+                    cmd.Parameters.AddWithValue("@g", "%" + sel + "%");
+                    using var adapter = new NpgsqlDataAdapter(cmd);
+                    conn.Open();
+                    adapter.Fill(dt);
+                }
+
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+            }
+            catch { /* ignore filter errors */ }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            var error = DatabaseHelper.Instance.TestConnection();
+            if (error == null)
+            {
+                XtraMessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                XtraMessageBox.Show($"Bağlantı hatası:\n{error}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void gridControl1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        // Manual update/progress UI removed
+    }
+}

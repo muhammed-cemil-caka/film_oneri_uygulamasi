@@ -1,0 +1,122 @@
+﻿using System;
+using System.Data;
+using System.Configuration;
+using Npgsql;
+using DevExpress.XtraEditors;
+using System.Windows.Forms;
+
+namespace DXApplication1
+{
+    // Singleton DatabaseHelper using Npgsql
+    public sealed class DatabaseHelper
+    {
+        private static readonly Lazy<DatabaseHelper> _instance = new(() => new DatabaseHelper());
+        public static DatabaseHelper Instance => _instance.Value;
+
+        private readonly string _connectionString;
+
+        private DatabaseHelper()
+        {
+            // Use the requested hard-coded connection string
+            _connectionString = "Host=localhost;Port=5432;Username=postgres;Database=film_db";
+        }
+
+        // Returns all movies from Movies table as a DataTable
+        public DataTable GetMovies()
+        {
+            var dt = new DataTable();
+
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, genre, rating FROM movies ORDER BY id", conn);
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                // open explicitly to catch connection issues early
+                conn.Open();
+                adapter.Fill(dt);
+            }
+            catch (Exception ex)
+            {
+                // Show full exception to help troubleshooting (includes inner exceptions and stack trace)
+                XtraMessageBox.Show($"Veritabanı bağlantı hatası:\n{ex}", "Veritabanı Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            return dt;
+        }
+
+        // Attempts to open a connection and returns null on success or the error message on failure
+        public string? TestConnection()
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+                conn.Close();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.ToString();
+            }
+        }
+
+        // Updates ratings for existing movies by querying OMDb. Returns number of updated rows or -1 on error.
+        public int UpdateRatingsFromOmdb()
+        {
+            var apiKey = ConfigurationManager.AppSettings["OmdbApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                XtraMessageBox.Show("OMDb API anahtarı App.config içinde ayarlı değil. Lütfen OmdbApiKey ekleyin.", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return -1;
+            }
+
+            try
+            {
+                var client = new OmdbClient(apiKey);
+
+                // Load movie names where rating is still 0.0 (only those we want to update)
+                var names = new System.Collections.Generic.List<(int id, string name)>();
+                using (var conn = new NpgsqlConnection(_connectionString))
+                using (var cmd = new NpgsqlCommand("SELECT id, movie_name FROM movies WHERE rating = 0.0", conn))
+                {
+                    conn.Open();
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        names.Add((reader.GetInt32(0), reader.GetString(1)));
+                    }
+                }
+
+                int updated = 0;
+                foreach (var item in names)
+                {
+                    var rating = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingAsync(item.name)).Result;
+                    // API cevabını görmek için döngü içine ekle
+                    XtraMessageBox.Show($"Film: {item.name} - Rating: {rating}");
+                    if (rating != null)
+                    {
+                        using var conn = new NpgsqlConnection(_connectionString);
+                        using var cmd = new NpgsqlCommand("UPDATE movies SET rating = @r WHERE id = @id", conn);
+
+                        // Kültür farkını (nokta-virgül ayrımı) ortadan kaldırmak için InvariantCulture kullanın
+                        decimal safeRating = Convert.ToDecimal(rating, System.Globalization.CultureInfo.InvariantCulture);
+
+                        cmd.Parameters.AddWithValue("@r", safeRating);
+                        cmd.Parameters.AddWithValue("@id", item.id);
+                        conn.Open();
+                        var rows = cmd.ExecuteNonQuery();
+                        if (rows > 0) updated += rows;
+                    }
+                }
+
+                XtraMessageBox.Show($"Güncelleme tamamlandı. Güncellenen satır sayısı: {updated}", "OMDb", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return updated;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"OMDb güncelleme hatası:\n{ex}", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return -1;
+            }
+        }
+    }
+}

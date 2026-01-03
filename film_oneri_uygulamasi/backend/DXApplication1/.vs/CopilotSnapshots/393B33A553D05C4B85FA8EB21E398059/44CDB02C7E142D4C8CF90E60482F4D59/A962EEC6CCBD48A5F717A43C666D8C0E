@@ -1,0 +1,237 @@
+﻿using System;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+namespace DXApplication1
+{
+    internal class OmdbClient
+    {
+        private readonly HttpClient _http;
+        private readonly string _apiKey;
+
+        public OmdbClient(string apiKey)
+        {
+            _apiKey = apiKey;
+            _http = new HttpClient();
+        }
+
+        public async Task<double?> GetImdbRatingAsync(string title, int? year = null)
+        {
+            // OMDb API: http://www.omdbapi.com/?t={title}&apikey={apikey}
+            var q = Uri.EscapeDataString(title);
+            var url = $"http://www.omdbapi.com/?t={q}&apikey={_apiKey}";
+            if (year.HasValue)
+                url += $"&y={year.Value}";
+            var res = await _http.GetAsync(url);
+            if (!res.IsSuccessStatusCode) return null;
+            using var stream = await res.Content.ReadAsStreamAsync();
+            var doc = await JsonDocument.ParseAsync(stream);
+            if (doc.RootElement.TryGetProperty("imdbRating", out var ratingEl))
+            {
+                var s = ratingEl.GetString();
+                if (double.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var r))
+                    return r;
+            }
+            return null;
+        }
+
+        // Get rating, year and genre for a title (tries direct title then search fallback)
+        public async Task<(double? rating, int? year, string? genre)> GetMovieDetailsAsync(string title, int? year = null)
+        {
+            // try direct
+            var q = Uri.EscapeDataString(title);
+            var url = $"http://www.omdbapi.com/?t={q}&apikey={_apiKey}";
+            if (year.HasValue) url += $"&y={year.Value}";
+
+            var res = await _http.GetAsync(url);
+            if (res.IsSuccessStatusCode)
+            {
+                using var stream = await res.Content.ReadAsStreamAsync();
+                var doc = await JsonDocument.ParseAsync(stream);
+                if (doc.RootElement.TryGetProperty("Response", out var resp) && resp.GetString() == "True")
+                {
+                    double? r = null; int? y = null; string? g = null;
+                    if (doc.RootElement.TryGetProperty("imdbRating", out var ratingEl))
+                    {
+                        var s = ratingEl.GetString();
+                        if (double.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var rv)) r = rv;
+                    }
+                    if (doc.RootElement.TryGetProperty("Year", out var yearEl))
+                    {
+                        var ys = yearEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(ys))
+                        {
+                            // Year can be "1994" or "1994–1998"; parse first 4 digits
+                            var m = System.Text.RegularExpressions.Regex.Match(ys, "(\\d{4})");
+                            if (m.Success && int.TryParse(m.Groups[1].Value, out var yv)) y = yv;
+                        }
+                    }
+                    if (doc.RootElement.TryGetProperty("Genre", out var genreEl)) g = genreEl.GetString();
+                    return (r, y, g);
+                }
+            }
+
+            // fallback: search then fetch by imdbID
+            var sUrl = $"http://www.omdbapi.com/?s={q}&apikey={_apiKey}" + (year.HasValue ? $"&y={year.Value}" : "");
+            var sres = await _http.GetAsync(sUrl);
+            if (!sres.IsSuccessStatusCode) return (null, null, null);
+            using var sstream = await sres.Content.ReadAsStreamAsync();
+            var sdoc = await JsonDocument.ParseAsync(sstream);
+            if (!sdoc.RootElement.TryGetProperty("Search", out var searchEl) || searchEl.ValueKind != JsonValueKind.Array) return (null, null, null);
+            foreach (var item in searchEl.EnumerateArray())
+            {
+                if (!item.TryGetProperty("imdbID", out var idEl)) continue;
+                var imdbId = idEl.GetString();
+                if (string.IsNullOrWhiteSpace(imdbId)) continue;
+                var detailUrl = $"http://www.omdbapi.com/?i={imdbId}&apikey={_apiKey}";
+                var dres = await _http.GetAsync(detailUrl);
+                if (!dres.IsSuccessStatusCode) continue;
+                using var dstream = await dres.Content.ReadAsStreamAsync();
+                var ddoc = await JsonDocument.ParseAsync(dstream);
+                if (ddoc.RootElement.TryGetProperty("imdbRating", out var ratingEl))
+                {
+                    double? r = null; int? y = null; string? g = null;
+                    var s = ratingEl.GetString();
+                    if (double.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var rv)) r = rv;
+                    if (ddoc.RootElement.TryGetProperty("Year", out var yearEl))
+                    {
+                        var ys = yearEl.GetString();
+                        var m = System.Text.RegularExpressions.Regex.Match(ys ?? "", "(\\d{4})");
+                        if (m.Success && int.TryParse(m.Groups[1].Value, out var yv)) y = yv;
+                    }
+                    if (ddoc.RootElement.TryGetProperty("Genre", out var genreEl)) g = genreEl.GetString();
+                    return (r, y, g);
+                }
+            }
+
+            return (null, null, null);
+        }
+
+        // Try multiple fallbacks and log responses to a file for debugging
+        public async Task<double?> GetImdbRatingWithFallbackAsync(string title, int? year = null)
+        {
+            string logPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "omdb_log.txt");
+            void Log(string text)
+            {
+                try { System.IO.File.AppendAllText(logPath, DateTime.Now.ToString("s") + " " + text + Environment.NewLine); } catch { }
+            }
+            // try direct by title
+            try
+            {
+                Log($"Starting fallback for: {title} year:{year}");
+
+                // common-typo corrections
+                var normalized = title;
+                if (normalized.IndexOf("iniana", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    // correct common misspelling
+                    normalized = System.Text.RegularExpressions.Regex.Replace(normalized, "iniana", "indiana", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    Log($"Applied typo correction: {normalized}");
+                }
+
+                // If title mentions Indiana Jones, try canonical franchise titles first
+                if (normalized.IndexOf("indiana jones", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var franchise = new[] {
+                        "Raiders of the Lost Ark",
+                        "Indiana Jones and the Temple of Doom",
+                        "Indiana Jones and the Last Crusade"
+                    };
+                    foreach (var f in franchise)
+                    {
+                        Log($"Trying franchise title: {f}");
+                        var fr = await GetImdbRatingAsync(f, year);
+                        Log($"Franchise direct result for {f}: {(fr.HasValue ? fr.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")} ");
+                        if (fr != null) return fr;
+
+                        var fs = await SearchAndGetRatingAsync(f, year);
+                        Log($"Franchise search result for {f}: {(fs.HasValue ? fs.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")} ");
+                        if (fs != null) return fs;
+                    }
+                }
+
+                Log($"Trying direct title: {normalized} year:{year}");
+                var r = await GetImdbRatingAsync(normalized, year);
+                Log($"Direct result: {(r.HasValue ? r.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")} ");
+                if (r != null) return r;
+
+                // try search-based
+                Log($"Trying search fallback: {normalized} year:{year}");
+                var sres = await SearchAndGetRatingAsync(normalized, year);
+                Log($"Search result: {(sres.HasValue ? sres.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")} ");
+                if (sres != null) return sres;
+
+                // try some normalized variants
+                var variants = new[] {
+                    normalized.Replace('·', '-'),
+                    normalized.Replace('·', ' '),
+                    normalized.Replace('’', '\''),
+                    normalized.Replace('–', '-'),
+                    System.Text.RegularExpressions.Regex.Replace(normalized, "[^a-zA-Z0-9 ]", " ")
+                };
+
+                foreach (var v in variants)
+                {
+                    if (string.Equals(v, normalized, StringComparison.Ordinal)) continue;
+                    Log($"Trying variant: {v}");
+                    var vr = await GetImdbRatingAsync(v, year);
+                    Log($"Variant direct result: {(vr.HasValue ? vr.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")} ");
+                    if (vr != null) return vr;
+
+                    var vs = await SearchAndGetRatingAsync(v, year);
+                    Log($"Variant search result: {(vs.HasValue ? vs.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")} ");
+                    if (vs != null) return vs;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Exception in fallback: {ex}");
+            }
+
+            Log($"All attempts failed for title: {title}");
+            return null;
+        }
+
+        // Search by title (s=) and return rating by fetching full data by imdbID if possible
+        public async Task<double?> SearchAndGetRatingAsync(string title, int? year = null)
+        {
+            var q = Uri.EscapeDataString(title);
+            var url = $"http://www.omdbapi.com/?s={q}&apikey={_apiKey}";
+            if (year.HasValue)
+                url += $"&y={year.Value}";
+
+            var res = await _http.GetAsync(url);
+            if (!res.IsSuccessStatusCode) return null;
+            using var stream = await res.Content.ReadAsStreamAsync();
+            var doc = await JsonDocument.ParseAsync(stream);
+            if (doc.RootElement.TryGetProperty("Search", out var searchEl) && searchEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in searchEl.EnumerateArray())
+                {
+                    if (item.TryGetProperty("imdbID", out var idEl))
+                    {
+                        var imdbId = idEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(imdbId))
+                        {
+                            // fetch by imdbID
+                            var detailUrl = $"http://www.omdbapi.com/?i={imdbId}&apikey={_apiKey}";
+                            var dres = await _http.GetAsync(detailUrl);
+                            if (!dres.IsSuccessStatusCode) continue;
+                            using var dstream = await dres.Content.ReadAsStreamAsync();
+                            var ddoc = await JsonDocument.ParseAsync(dstream);
+                            if (ddoc.RootElement.TryGetProperty("imdbRating", out var ratingEl))
+                            {
+                                var s = ratingEl.GetString();
+                                if (double.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var r))
+                                    return r;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+    }
+}

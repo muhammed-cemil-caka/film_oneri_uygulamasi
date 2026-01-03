@@ -1,0 +1,80 @@
+﻿using System;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+namespace DXApplication1
+{
+    internal class OmdbClient
+    {
+        private readonly HttpClient _http;
+        private readonly string _apiKey;
+
+        public OmdbClient(string apiKey)
+        {
+            _apiKey = apiKey;
+            _http = new HttpClient();
+        }
+
+        public async Task<double?> GetImdbRatingAsync(string title, int? year = null)
+        {
+            // OMDb API: http://www.omdbapi.com/?t={title}&apikey={apikey}
+            var q = Uri.EscapeDataString(title);
+            var url = $"http://www.omdbapi.com/?t={q}&apikey={_apiKey}";
+            if (year.HasValue)
+                url += $"&y={year.Value}";
+            var res = await _http.GetAsync(url);
+            if (!res.IsSuccessStatusCode) return null;
+            using var stream = await res.Content.ReadAsStreamAsync();
+            var doc = await JsonDocument.ParseAsync(stream);
+            if (doc.RootElement.TryGetProperty("imdbRating", out var ratingEl))
+            {
+                var s = ratingEl.GetString();
+                if (double.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var r))
+                    return r;
+            }
+            return null;
+        }
+
+        // Search by title (s=) and return rating by fetching full data by imdbID if possible
+        public async Task<double?> SearchAndGetRatingAsync(string title, int? year = null)
+        {
+            var q = Uri.EscapeDataString(title);
+            var url = $"http://www.omdbapi.com/?s={q}&apikey={_apiKey}";
+            if (year.HasValue)
+                url += $"&y={year.Value}";
+
+            var res = await _http.GetAsync(url);
+            if (!res.IsSuccessStatusCode) return null;
+            using var stream = await res.Content.ReadAsStreamAsync();
+            var doc = await JsonDocument.ParseAsync(stream);
+            if (doc.RootElement.TryGetProperty("Search", out var searchEl) && searchEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in searchEl.EnumerateArray())
+                {
+                    if (item.TryGetProperty("imdbID", out var idEl))
+                    {
+                        var imdbId = idEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(imdbId))
+                        {
+                            // fetch by imdbID
+                            var detailUrl = $"http://www.omdbapi.com/?i={imdbId}&apikey={_apiKey}";
+                            var dres = await _http.GetAsync(detailUrl);
+                            if (!dres.IsSuccessStatusCode) continue;
+                            using var dstream = await dres.Content.ReadAsStreamAsync();
+                            var ddoc = await JsonDocument.ParseAsync(dstream);
+                            if (ddoc.RootElement.TryGetProperty("imdbRating", out var ratingEl))
+                            {
+                                var s = ratingEl.GetString();
+                                if (double.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var r))
+                                    return r;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+    }
+}

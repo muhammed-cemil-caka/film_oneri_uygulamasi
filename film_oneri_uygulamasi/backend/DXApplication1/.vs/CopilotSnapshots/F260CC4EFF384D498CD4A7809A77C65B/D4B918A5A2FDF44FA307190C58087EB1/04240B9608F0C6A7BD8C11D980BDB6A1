@@ -1,0 +1,1352 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Diagnostics;
+using System.Drawing;
+using System.Linq;
+using System.Windows.Forms;
+using DevExpress.XtraEditors;
+using DevExpress.XtraGrid.Views.Grid;
+using DevExpress.XtraGrid.Views.Tile;
+using DevExpress.Utils;
+using System.Text.RegularExpressions;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        // Yıldız görselleri (Favori sütunu için)
+        private Bitmap _emptyStar;
+        private Bitmap _filledStar;
+
+        // Durum değişkenleri
+        private int? _lastRecommendedId = null;
+        private HashSet<int> _top5Ids = new HashSet<int>();
+        // When user filters by ID in the auto-filter row, keep that value here
+        private int? _activeIdFilter = null;
+        // Track the active auto-filter editor so we can react to Enter/Leave
+        private DevExpress.XtraEditors.BaseEdit _activeAutoFilterEditor = null;
+        // UI buttons added at runtime
+        private DevExpress.XtraEditors.SimpleButton btnFavorites;
+        private DevExpress.XtraEditors.SimpleButton btnBackFavorites;
+        // Tile click handling: delay toggle so double-click doesn't toggle twice
+        private System.Windows.Forms.Timer _tileClickTimer;
+        private int? _pendingTileClickId = null;
+        // Hover tracking for TileView cards
+        private int _hoveredTileRowHandle = int.MinValue;
+
+        public Form1()
+        {
+            InitializeComponent();
+
+            // Form başlangıçta tam ekran
+            try { this.WindowState = FormWindowState.Maximized; } catch { }
+
+            // ESC ile kapatma
+            this.KeyPreview = true;
+            this.KeyDown += Form1_KeyDown;
+
+            try { gridControl1.Dock = DockStyle.Fill; } catch { }
+
+            EnsureStarImages();
+
+            // Veriyi yükle
+            LoadData();
+
+            // Favoriler ve Geri butonlarını programatik olarak ekle (küçük refactor: ortak özellikler helper ile oluşturulur)
+            try
+            {
+                // baseline Y-coordinate chosen to match designer alignment
+                var baselineY = 162;
+                btnFavorites = CreateRuntimeButton("Favoriler", new Size(140, 44), new Point(290 + 160 + 12, baselineY), BtnFavorites_Click,
+                    backColor: Color.FromArgb(60, 60, 60), foreColor: Color.White, font: new Font("Segoe UI", 10F, FontStyle.Regular));
+                this.Controls.Add(btnFavorites);
+
+                var backLocation = new Point(btnFavorites.Location.X + btnFavorites.Width + 12, btnFavorites.Location.Y);
+                btnBackFavorites = CreateRuntimeButton("Geri", new Size(100, 44), backLocation, BtnBackFavorites_Click,
+                    backColor: Color.FromArgb(245, 245, 245), foreColor: Color.Black, font: new Font("Segoe UI", 10F, FontStyle.Regular));
+                btnBackFavorites.Enabled = false;
+                this.Controls.Add(btnBackFavorites);
+            }
+            catch { }
+        }
+
+        // Best-effort overlay paint: draw drop shadows behind tile items by using the TileView's GetHitInfo-like APIs
+        private void GridControl1_Paint_DrawShadows(object? sender, PaintEventArgs e)
+        {
+            try
+            {
+                var gc = sender as DevExpress.XtraGrid.GridControl; if (gc == null) return;
+                var tile = gc.MainView as TileView; if (tile == null) return;
+                var g = e.Graphics; g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                int radius = 12;
+                var rowCount = tile.RowCount;
+                for (int i = 0; i < rowCount; i++)
+                {
+                    try
+                    {
+                        var rect = tile.GetRowVisualBounds(i);
+                        if (rect.IsEmpty) continue;
+                        // convert to gridcontrol coordinates
+                        var r = new Rectangle(rect.Left + gc.Bounds.Left, rect.Top + gc.Bounds.Top, rect.Width, rect.Height);
+                        // draw subtle outer shadow
+                        using (var brush = new SolidBrush(Color.FromArgb(35, 0, 0, 0)))
+                        {
+                            var shadowRect = new Rectangle(r.Left + 4, r.Top + 6, r.Width - 8, r.Height - 6);
+                            FillRoundedRectangle(g, shadowRect, radius, brush);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+            catch { }
+        }
+
+        // (Rounded-rect helpers removed; shadow simulated via borders/appearance)
+
+        private void GridControl1_MouseMove_ForTileHover(object? sender, MouseEventArgs e)
+        {
+            try
+            {
+                var gc = sender as DevExpress.XtraGrid.GridControl; if (gc == null) return;
+                var tile = gc.MainView as TileView; if (tile == null) return;
+                var pt = e.Location;
+                var hi = tile.CalcHitInfo(pt);
+                int newHandle = (hi != null && hi.RowHandle >= 0) ? hi.RowHandle : int.MinValue;
+                if (newHandle != _hoveredTileRowHandle)
+                {
+                    _hoveredTileRowHandle = newHandle;
+                    try { tile.RefreshData(); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void GridControl1_MouseLeave_ForTileHover(object? sender, EventArgs e)
+        {
+            try
+            {
+                var gc = sender as DevExpress.XtraGrid.GridControl; if (gc == null) return;
+                var tile = gc.MainView as TileView; if (tile == null) return;
+                if (_hoveredTileRowHandle != int.MinValue)
+                {
+                    _hoveredTileRowHandle = int.MinValue;
+                    try { tile.RefreshData(); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        // When grid auto-filter row changes (user clears filter with the UI), ensure our id filter state is consistent
+        private void GridView_ColumnFilterChanged(object sender, EventArgs e)
+        {
+            try
+            {
+                var gv = sender as GridView; if (gv == null) return;
+                // If the active filter string no longer contains an exact id filter, clear our state
+                if (string.IsNullOrWhiteSpace(gv.ActiveFilterString) || !Regex.IsMatch(gv.ActiveFilterString, "\\[id\\]\\s*=\\s*\\d+"))
+                {
+                    _activeIdFilter = null;
+                    gv.RefreshData();
+                }
+                else
+                {
+                    // extract id from filter string
+                    var m = Regex.Match(gv.ActiveFilterString, "\\[id\\]\\s*=\\s*(\\d+)");
+                    if (m.Success && int.TryParse(m.Groups[1].Value, out int idVal)) _activeIdFilter = idVal;
+                }
+            }
+            catch { }
+        }
+
+        // Helper to create runtime buttons with consistent styling
+        private DevExpress.XtraEditors.SimpleButton CreateRuntimeButton(string text, Size size, Point location, EventHandler onClick, Color? backColor = null, Color? foreColor = null, Font? font = null)
+        {
+            var b = new DevExpress.XtraEditors.SimpleButton();
+            b.Text = text;
+            b.Size = size;
+            b.Location = location;
+            b.Appearance.Font = font ?? new Font("Segoe UI", 10F, FontStyle.Regular);
+            if (foreColor.HasValue) { b.Appearance.ForeColor = foreColor.Value; b.Appearance.Options.UseForeColor = true; }
+            b.Appearance.Options.UseFont = true;
+            if (backColor.HasValue) { b.Appearance.BackColor = backColor.Value; b.Appearance.Options.UseBackColor = true; }
+            b.LookAndFeel.UseDefaultLookAndFeel = false;
+            b.LookAndFeel.Style = DevExpress.LookAndFeel.LookAndFeelStyle.Style3D;
+            if (onClick != null) b.Click += onClick;
+            return b;
+        }
+
+        private void GridView_ShownEditor(object sender, EventArgs e)
+        {
+            try
+            {
+                var view = sender as GridView; if (view == null) return;
+                var col = view.FocusedColumn; if (col == null) return;
+                // If user started editing the auto-filter cell for our display_id column
+                if (string.Equals(col.FieldName, "display_id", StringComparison.OrdinalIgnoreCase) && view.ActiveEditor != null)
+                {
+                    // track editor and hook enter/leave
+                    _activeAutoFilterEditor = view.ActiveEditor as DevExpress.XtraEditors.BaseEdit;
+                    if (_activeAutoFilterEditor != null)
+                    {
+                        _activeAutoFilterEditor.KeyDown -= AutoFilterEditor_KeyDown; _activeAutoFilterEditor.KeyDown += AutoFilterEditor_KeyDown;
+                        _activeAutoFilterEditor.Leave -= AutoFilterEditor_Leave; _activeAutoFilterEditor.Leave += AutoFilterEditor_Leave;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void AutoFilterEditor_KeyDown(object sender, KeyEventArgs e)
+        {
+            try
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    ApplyIdFilterFromEditor();
+                }
+            }
+            catch { }
+        }
+
+        private void AutoFilterEditor_Leave(object sender, EventArgs e)
+        {
+            try { ApplyIdFilterFromEditor(); } catch { }
+        }
+
+        private void ApplyIdFilterFromEditor()
+        {
+            try
+            {
+                if (_activeAutoFilterEditor == null) return;
+                var txt = _activeAutoFilterEditor.EditValue?.ToString();
+                _activeAutoFilterEditor.KeyDown -= AutoFilterEditor_KeyDown; _activeAutoFilterEditor.Leave -= AutoFilterEditor_Leave;
+                _activeAutoFilterEditor = null;
+
+                if (string.IsNullOrWhiteSpace(txt)) { ClearIdFilter(); return; }
+                if (int.TryParse(txt.Trim(), out int idVal))
+                {
+                    _activeIdFilter = idVal;
+                    ApplyIdFilter(idVal);
+                }
+                else
+                {
+                    ClearIdFilter();
+                }
+            }
+            catch { }
+        }
+
+        private void ApplyIdFilter(int id)
+        {
+            try
+            {
+                var gv = this.gridView1;
+                if (gv == null) return;
+                // apply filter on hidden real id column
+                gv.ActiveFilterString = $"[id] = {id}";
+                // refresh so CustomUnboundColumnData still provides sequential numbers but
+                // we want to display the real DB id for the single-row result — so temporarily
+                // set display_id's FieldName to 'id' when exact-id filter is active.
+                // Keep the visible column as the unbound "display_id" column. CustomUnboundColumnData
+                // will return the real DB id when _activeIdFilter is set, so no need to rebind the column.
+                _activeIdFilter = id;
+                gv.RefreshData();
+            }
+            catch { }
+        }
+
+        private void ClearIdFilter()
+        {
+            try
+            {
+                var gv = this.gridView1; if (gv == null) return;
+                _activeIdFilter = null;
+                gv.ActiveFilterString = string.Empty;
+                _activeIdFilter = null;
+                gv.RefreshData();
+            }
+            catch { }
+        }
+        
+        // Draw a star at the end of the movie_name cell to indicate favorite status
+
+
+        
+        // Draw a star at the end of the movie_name cell to indicate favorite status
+        private void GridView_CustomDrawMovieNameCell(object sender, DevExpress.XtraGrid.Views.Base.RowCellCustomDrawEventArgs e)
+        {
+            try
+            {
+                // Only draw movie name text here (remove star drawing from this cell)
+                if (e.Column == null || !string.Equals(e.Column.FieldName, "movie_name", StringComparison.OrdinalIgnoreCase)) return;
+                var view = sender as GridView;
+                if (view == null) return;
+                // let default draw occur first
+                // draw star on the right side of the cell
+                var idObj = view.GetRowCellValue(e.RowHandle, "id");
+                bool isFav = false;
+                try { if (idObj != null && idObj != DBNull.Value) isFav = DatabaseHelper.Instance.IsFavorite(Convert.ToInt32(idObj)); } catch { }
+
+                // draw only text (fill full width)
+                var rect = e.Bounds;
+                e.Appearance.DrawString(e.Cache, e.DisplayText, new Rectangle(rect.Left + 4, rect.Top, rect.Width - 8, rect.Height));
+                e.Handled = true;
+            }
+            catch { }
+        }
+
+        private void GridView_CustomDrawFavoriteCell(object sender, DevExpress.XtraGrid.Views.Base.RowCellCustomDrawEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null || !string.Equals(e.Column.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase)) return;
+                var view = sender as GridView; if (view == null) return;
+                var idObj = view.GetRowCellValue(e.RowHandle, "id");
+                bool isFav = false;
+                try { if (idObj != null && idObj != DBNull.Value) isFav = DatabaseHelper.Instance.IsFavorite(Convert.ToInt32(idObj)); } catch { }
+
+                var rect = e.Bounds;
+                int size = 16;
+                var starRect = new Rectangle(rect.Left + (rect.Width - size) / 2, rect.Top + (rect.Height - size) / 2, size, size);
+                try
+                {
+                    var bmp = isFav ? _filledStar : _emptyStar;
+                    if (bmp != null) e.Graphics.DrawImage(bmp, starRect);
+                }
+                catch { }
+                e.Handled = true;
+            }
+            catch { }
+        }
+
+        private void GridView_DoubleClick(object sender, EventArgs e)
+        {
+            try
+            {
+                var view = sender as GridView; if (view == null) return;
+                var hi = view.CalcHitInfo(view.GridControl.PointToClient(MousePosition));
+                if (hi == null || hi.RowHandle < 0) return;
+                var row = view.GetDataRow(hi.RowHandle); if (row == null) return;
+                if (row.Table.Columns.Contains("id") && !row.IsNull("id"))
+                {
+                    int id = Convert.ToInt32(row["id"]);
+                    string name = row.Table.Columns.Contains("movie_name") && !row.IsNull("movie_name") ? row.Field<string>("movie_name") : string.Empty;
+                    double rating = row.Table.Columns.Contains("rating") && !row.IsNull("rating") ? Convert.ToDouble(row["rating"]) : 0.0;
+                    // try to pass genre for the dialog so "Başka Öner" can work
+                    string genre = row.Table.Columns.Contains("genre") && !row.IsNull("genre") ? row.Field<string>("genre") : null;
+                    ShowRecommendationDialog(name, rating, id, genre);
+                }
+            }
+            catch { }
+        }
+
+        // Sadece rating hücrelerini renklendirir
+        private void GridView_CustomDrawRatingCell(object sender, DevExpress.XtraGrid.Views.Base.RowCellCustomDrawEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null || !string.Equals(e.Column.FieldName, "rating", StringComparison.OrdinalIgnoreCase)) return;
+                object val = gridView1.GetRowCellValue(e.RowHandle, "rating"); double rating = 0.0; try { if (val != null && val != DBNull.Value) rating = Convert.ToDouble(val); } catch { }
+                if (rating >= 8.5) e.Appearance.BackColor = Color.FromArgb(235, 248, 236);
+                else if (rating >= 7.0) e.Appearance.BackColor = Color.FromArgb(255, 252, 230);
+                else e.Appearance.BackColor = Color.FromArgb(255, 241, 243);
+                // center rating text
+                e.Appearance.TextOptions.HAlignment = HorzAlignment.Center;
+            }
+            catch { }
+        }
+
+        // Designer tarafından çağrılan stub
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            // Yükleme constructor içinde zaten yapıldı; yine de stub mevcut olsun
+        }
+
+        private void LoadData()
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                // Film isimlerini Türkçe yapma mantığı
+                try
+                {
+                    if (dt != null && dt.Rows.Count > 0 && dt.Columns.Contains("movie_name"))
+                    {
+                        for (int i = 0; i < dt.Rows.Count; i++)
+                        {
+                            var row = dt.Rows[i];
+                            try
+                            {
+                                var en = row.Field<string>("movie_name");
+                                var tr = DatabaseHelper.Instance.GetTurkishMovieName(en);
+                                if (!string.IsNullOrWhiteSpace(tr)) row["movie_name"] = tr;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+
+                gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+                UpdateTop5FromDataSource();
+
+                // Tür listesini doldur
+                try
+                {
+                    if (comboBoxGenres.Items.Count <= 1)
+                    {
+                        comboBoxGenres.Items.Clear();
+                        comboBoxGenres.Items.Add("Hepsi");
+                        foreach (var g in DatabaseHelper.Instance.GetDistinctGenres())
+                            comboBoxGenres.Items.Add(g);
+                        comboBoxGenres.SelectedIndex = 0;
+                    }
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                DevExpress.XtraEditors.XtraMessageBox.Show($"Veri yüklenirken hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // (Detail panel removed)
+
+        private void ConfigureGrid(DataTable dt)
+        {
+            try
+            {
+                // Ensure a helper 'favorite_star' column for UI-only star display
+                try
+                {
+                    if (dt != null)
+                    {
+                        if (!dt.Columns.Contains("favorite_star")) dt.Columns.Add("favorite_star", typeof(string));
+                        if (!dt.Columns.Contains("rating_display")) dt.Columns.Add("rating_display", typeof(string));
+                        if (!dt.Columns.Contains("genre_display")) dt.Columns.Add("genre_display", typeof(string));
+                        for (int i = 0; i < dt.Rows.Count; i++)
+                        {
+                            var row = dt.Rows[i];
+                            try
+                            {
+                                if (dt.Columns.Contains("id") && !row.IsNull("id"))
+                                {
+                                    int id = Convert.ToInt32(row["id"]);
+                                    row["favorite_star"] = DatabaseHelper.Instance.IsFavorite(id) ? "★" : string.Empty;
+                                }
+                                else row["favorite_star"] = string.Empty;
+                                // prepare a display string for rating with a star symbol
+                                try
+                                {
+                                    if (dt.Columns.Contains("rating") && !row.IsNull("rating"))
+                                    {
+                                        double rv = Convert.ToDouble(row["rating"]);
+                                        row["rating_display"] = string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:0.0} ★", rv);
+                                    }
+                                    else row["rating_display"] = string.Empty;
+                                }
+                                catch { row["rating_display"] = string.Empty; }
+                                // prepare a short genre display (max two genres) without altering original genre column
+                                try
+                                {
+                                    if (dt.Columns.Contains("genre") && !row.IsNull("genre"))
+                                    {
+                                        var genres = row.Field<string>("genre")?.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                                                            .Select(g => g.Trim()).Where(g => g.Length > 0).ToArray() ?? new string[0];
+                                        if (genres.Length <= 2) row["genre_display"] = string.Join(", ", genres);
+                                        else row["genre_display"] = string.Join(", ", genres.Take(2));
+                                    }
+                                    else row["genre_display"] = string.Empty;
+                                }
+                                catch { row["genre_display"] = string.Empty; }
+                            }
+                            catch { row["favorite_star"] = string.Empty; }
+                        }
+                    }
+                }
+                catch { }
+
+                // Create TileView and set it as main view
+                var tile = new TileView(gridControl1) { Name = "tileView1" };
+                gridControl1.MainView = tile;
+                gridControl1.ForceInitialize();
+
+                // Clear existing columns and configure tile columns
+                tile.Columns.Clear();
+                var colId = tile.Columns.AddField("id"); colId.FieldName = "id"; colId.Visible = false;
+                var colMovie = tile.Columns.AddField("movie_name"); colMovie.FieldName = "movie_name"; colMovie.Visible = true;
+                var colGenre = tile.Columns.AddField("genre"); colGenre.FieldName = "genre"; colGenre.Visible = true;
+                var colGenreDisplay = tile.Columns.AddField("genre_display"); colGenreDisplay.FieldName = "genre_display"; colGenreDisplay.Visible = true;
+                var colRating = tile.Columns.AddField("rating"); colRating.FieldName = "rating"; colRating.Visible = true;
+                var colRatingDisplay = tile.Columns.AddField("rating_display"); colRatingDisplay.FieldName = "rating_display"; colRatingDisplay.Visible = true;
+                // remove custom rating display styling to revert to previous behavior
+                var colStar = tile.Columns.AddField("favorite_star"); colStar.FieldName = "favorite_star"; colStar.Visible = true;
+
+                // Basic tile template: title, genre, rating badge, favorite star
+                tile.TileTemplate.Clear();
+
+                // Define template elements with positions
+                var elemStar = new DevExpress.XtraGrid.Views.Tile.TileViewItemElement() { Column = colStar };
+                // star element (will be added first so renders on top-left by template order)
+                elemStar.Text = "favorite_star";
+                // add a little padding so it doesn't touch rounded corners
+                try
+                {
+                    // TileViewItemElement may expose appearance padding via Appearance.Normal.Padding in some versions
+                    var padProp = elemStar.Appearance.Normal.GetType().GetProperty("Padding");
+                    if (padProp != null && padProp.CanWrite) padProp.SetValue(elemStar.Appearance.Normal, new Padding(8));
+                }
+                catch { }
+                tile.TileTemplate.Add(elemStar);
+                // Style the star column so it appears large and top-left with comfortable padding
+                try
+                {
+                    colStar.AppearanceCell.Font = new Font("Segoe UI", 14, FontStyle.Regular);
+                    colStar.AppearanceCell.ForeColor = Color.FromArgb(255, 193, 7);
+                    colStar.AppearanceCell.Options.UseFont = true;
+                    colStar.AppearanceCell.Options.UseForeColor = true;
+                    colStar.AppearanceCell.TextOptions.HAlignment = HorzAlignment.Near;
+                    colStar.AppearanceCell.TextOptions.VAlignment = VertAlignment.Top;
+                    colStar.AppearanceCell.Options.UseTextOptions = true;
+                    // provide cell padding if supported
+                    try { var p = colStar.AppearanceCell.GetType().GetProperty("Padding"); if (p != null && p.CanWrite) p.SetValue(colStar.AppearanceCell, new Padding(8)); } catch { }
+                }
+                catch { }
+
+                var elemTitle = new DevExpress.XtraGrid.Views.Tile.TileViewItemElement() { Column = colMovie };
+                // title (centered by template ordering)
+                elemTitle.Text = "movie_name";
+                // set premium font and alignment
+                try
+                {
+                    elemTitle.Appearance.Normal.Font = new Font("Segoe UI Semibold", 13F, FontStyle.Regular);
+                    elemTitle.Appearance.Normal.ForeColor = Color.FromArgb(34, 34, 34);
+                    elemTitle.Appearance.Normal.Options.UseFont = true;
+                    elemTitle.Appearance.Normal.Options.UseForeColor = true;
+                    elemTitle.Appearance.Normal.TextOptions.HAlignment = HorzAlignment.Center;
+                    elemTitle.Appearance.Normal.TextOptions.VAlignment = VertAlignment.Top;
+                    elemTitle.Appearance.Normal.TextOptions.Trimming = DevExpress.Utils.Trimming.EllipsisCharacter;
+                    elemTitle.Appearance.Normal.TextOptions.WordWrap = DevExpress.Utils.WordWrap.NoWrap;
+                    elemTitle.Appearance.Normal.Options.UseTextOptions = true;
+                }
+                catch { }
+                tile.TileTemplate.Add(elemTitle);
+                try
+                {
+                    // Mirror to cell appearance for fallback
+                    colMovie.AppearanceCell.Font = new Font("Segoe UI Semibold", 13F, FontStyle.Regular);
+                    colMovie.AppearanceCell.Options.UseFont = true;
+                    colMovie.AppearanceCell.TextOptions.HAlignment = HorzAlignment.Center;
+                    colMovie.AppearanceCell.TextOptions.VAlignment = VertAlignment.Top;
+                    colMovie.AppearanceCell.TextOptions.Trimming = DevExpress.Utils.Trimming.EllipsisCharacter;
+                    colMovie.AppearanceCell.TextOptions.WordWrap = DevExpress.Utils.WordWrap.NoWrap;
+                    colMovie.AppearanceCell.Options.UseTextOptions = true;
+                }
+                catch { }
+
+                var elemGenre = new DevExpress.XtraGrid.Views.Tile.TileViewItemElement() { Column = colGenreDisplay };
+                // genre (placed towards bottom-left by template ordering)
+                elemGenre.Text = "genre";
+                // use default positioning and smaller, italic font for genre_display
+                elemGenre.Appearance.Normal.Font = new Font("Segoe UI", 9, FontStyle.Italic);
+                elemGenre.Appearance.Normal.ForeColor = Color.FromArgb(120, 120, 120);
+                elemGenre.Appearance.Normal.Options.UseFont = true;
+                elemGenre.Appearance.Normal.Options.UseForeColor = true;
+                elemGenre.Text = "genre_display";
+                tile.TileTemplate.Add(elemGenre);
+                // reduce genre font to avoid overlap
+                try
+                {
+                    // Reduce genre font further and enable wrapping
+                    colGenre.AppearanceCell.Font = new Font("Segoe UI", 8, FontStyle.Regular);
+                    colGenre.AppearanceCell.Options.UseFont = true;
+                    colGenre.AppearanceCell.TextOptions.HAlignment = HorzAlignment.Near;
+                    colGenre.AppearanceCell.TextOptions.VAlignment = VertAlignment.Bottom;
+                    colGenre.AppearanceCell.TextOptions.WordWrap = DevExpress.Utils.WordWrap.Wrap;
+                    colGenre.AppearanceCell.Options.UseTextOptions = true;
+                }
+                catch { }
+
+                var elemRating = new DevExpress.XtraGrid.Views.Tile.TileViewItemElement() { Column = colRatingDisplay };
+                // rating (placed towards bottom-right by template ordering) with star symbol
+                elemRating.Text = "rating_display";
+                // configure rating as a rounded pill badge at bottom-right
+                try
+                {
+                    elemRating.Appearance.Normal.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+                    elemRating.Appearance.Normal.ForeColor = Color.FromArgb(32, 32, 32);
+                    elemRating.Appearance.Normal.Options.UseFont = true;
+                    elemRating.Appearance.Normal.Options.UseForeColor = true;
+                    elemRating.Appearance.Normal.TextOptions.HAlignment = HorzAlignment.Center;
+                    elemRating.Appearance.Normal.TextOptions.VAlignment = VertAlignment.Center;
+                    elemRating.Appearance.Normal.TextOptions.Trimming = DevExpress.Utils.Trimming.EllipsisCharacter;
+                    elemRating.Appearance.Normal.TextOptions.WordWrap = DevExpress.Utils.WordWrap.NoWrap;
+                    elemRating.Appearance.Normal.Options.UseTextOptions = true;
+                    // pill background and border to simulate depth
+                    elemRating.Appearance.Normal.BackColor = Color.FromArgb(255, 243, 170); // soft yellow
+                    elemRating.Appearance.Normal.Options.UseBackColor = true;
+                    elemRating.Appearance.Normal.BorderColor = Color.FromArgb(200, 180, 80);
+                    elemRating.Appearance.Normal.Options.UseBorderColor = true;
+                    // attempt to set padding and corner on the element if supported
+                    try { var pad = elemRating.Appearance.Normal.GetType().GetProperty("Padding"); if (pad != null && pad.CanWrite) pad.SetValue(elemRating.Appearance.Normal, new Padding(8, 4, 8, 4)); } catch { }
+                }
+                catch { }
+                tile.TileTemplate.Add(elemRating);
+
+                // Tile sizing and appearance
+                tile.OptionsTiles.ItemSize = new Size(250, 120);
+                // rounded corners / padding for a premium card look
+                try
+                {
+                    tile.OptionsTiles.ItemPadding = new Padding(14);
+                    tile.OptionsTiles.Padding = new Padding(8);
+                    // ensure vertical smooth scrolling
+                    tile.OptionsTiles.Orientation = Orientation.Vertical;
+                    // hover styling is handled in ItemCustomize using _hoveredTileRowHandle
+
+                    // attempt to set ItemCornerRadius to 15 via reflection on options
+                    try
+                    {
+                        var opt = tile.GetType().GetProperty("OptionsTiles")?.GetValue(tile);
+                        if (opt != null)
+                        {
+                            var radiusProps = new string[] { "ItemCornerRadius", "CornerRadius", "Radius", "ItemRadius" };
+                            foreach (var rn in radiusProps)
+                            {
+                                try
+                                {
+                                    var p = opt.GetType().GetProperty(rn);
+                                    if (p != null && p.CanWrite)
+                                    {
+                                        p.SetValue(opt, 15);
+                                        break;
+                                    }
+                                }
+                                catch { }
+                            }
+
+                            // enable any smooth scroll flags if present
+                            var smoothNames = new[] { "SmoothScrolling", "EnableSmoothScrolling", "AllowSmoothScrolling" };
+                            foreach (var sn in smoothNames)
+                            {
+                                try
+                                {
+                                    var p = opt.GetType().GetProperty(sn);
+                                    if (p != null && p.CanWrite && p.PropertyType == typeof(bool)) p.SetValue(opt, true);
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                catch { }
+                tile.OptionsTiles.RowCount = 0;
+                tile.OptionsTiles.AllowPressAnimation = true;
+                // Vertical scrolling / flow top-to-bottom
+                tile.OptionsTiles.Orientation = Orientation.Vertical;
+
+                // Visual styling similar to previous grid
+                tile.Appearance.ItemNormal.BackColor = Color.White;
+                tile.Appearance.ItemNormal.Options.UseBackColor = true;
+                tile.Appearance.ItemPressed.BackColor = Color.FromArgb(232, 244, 255);
+                tile.Appearance.ItemPressed.Options.UseBackColor = true;
+                // Title appearance (restore larger title font)
+                tile.Appearance.ItemNormal.Font = new Font("Segoe UI", 14, FontStyle.Bold);
+                tile.Appearance.ItemNormal.Options.UseFont = true;
+
+                // Highlight movies by IMDb rating: green / yellow / red
+                tile.ItemCustomize += (s, e) =>
+                {
+                    try
+                    {
+                        var drv = tile.GetRow(e.RowHandle) as DataRowView;
+                        if (drv != null)
+                        {
+                            double rv = 0.0; try { rv = Convert.ToDouble(drv.Row["rating"]); } catch { }
+                            // apply color bands consistent with GridView row styling
+                            if (rv >= 8.5)
+                            {
+                                // pastel green
+                                e.Item.Appearance.BackColor = Color.FromArgb(235, 248, 236);
+                                e.Item.Appearance.Options.UseBackColor = true;
+                            }
+                            else if (rv >= 7.0)
+                            {
+                                // pastel yellow
+                                e.Item.Appearance.BackColor = Color.FromArgb(255, 252, 230);
+                                e.Item.Appearance.Options.UseBackColor = true;
+                            }
+                            else
+                            {
+                                // pastel red
+                                e.Item.Appearance.BackColor = Color.FromArgb(255, 241, 243);
+                                e.Item.Appearance.Options.UseBackColor = true;
+                            }
+
+                            // default border to simulate subtle shadow/edge
+                            try
+                            {
+                                e.Item.Appearance.BorderColor = Color.LightGray;
+                                e.Item.Appearance.Options.UseBorderColor = true;
+                            }
+                            catch { }
+
+                            // Hover effect: when this row is hovered, highlight border/background
+                            try
+                            {
+                                if (e.RowHandle == _hoveredTileRowHandle)
+                                {
+                                    e.Item.Appearance.BorderColor = Color.FromArgb(40, 120, 220);
+                                    e.Item.Appearance.Options.UseBorderColor = true;
+                                    // subtle brighten on hover without losing band color
+                                    try { e.Item.Appearance.BackColor = ControlPaint.Light(e.Item.Appearance.BackColor); } catch { }
+                                    e.Item.Appearance.Options.UseBackColor = true;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                };
+
+                // Track mouse hover to show hover effect on tiles
+                try
+                {
+                    gridControl1.MouseMove -= GridControl1_MouseMove_ForTileHover; gridControl1.MouseMove += GridControl1_MouseMove_ForTileHover;
+                    gridControl1.MouseLeave -= GridControl1_MouseLeave_ForTileHover; gridControl1.MouseLeave += GridControl1_MouseLeave_ForTileHover;
+                }
+                catch { }
+
+                // Simulate depth using border and subtle gradient if available
+                try
+                {
+                    try { tile.Appearance.ItemNormal.BackColor2 = Color.FromArgb(250, 250, 250); tile.Appearance.ItemNormal.Options.UseBackColor2 = true; } catch { }
+                    try { tile.Appearance.ItemNormal.BorderColor = Color.FromArgb(220, 220, 220); tile.Appearance.ItemNormal.Options.UseBorderColor = true; } catch { }
+                }
+                catch { }
+
+                // Paint overlay shadows for tiles (best-effort via reflection of internal view info)
+                try
+                {
+                    gridControl1.Paint -= GridControl1_Paint_DrawShadows; gridControl1.Paint += GridControl1_Paint_DrawShadows;
+                }
+                catch { }
+
+                // Toggle favorite when tile is clicked (tile-level click toggles favorite)
+                // initialize timer once
+                if (_tileClickTimer == null)
+                {
+                    _tileClickTimer = new System.Windows.Forms.Timer();
+                    _tileClickTimer.Interval = SystemInformation.DoubleClickTime;
+                    _tileClickTimer.Tick += TileClickTimer_Tick;
+                }
+
+                // Start a pending toggle on first click; if a second click for the same tile
+                // occurs within the double-click time window we cancel the pending toggle so
+                // the double-click can be handled separately (showing the dialog) without
+                // toggling the favorite twice.
+                tile.ItemClick += (s, e) =>
+                {
+                    try
+                    {
+                        var hit = tile.CalcHitInfo(gridControl1.PointToClient(MousePosition));
+                        if (hit == null) return;
+                        int rowHandle = hit.RowHandle;
+                        if (rowHandle < 0) return;
+                        var idObj = tile.GetRowCellValue(rowHandle, "id");
+                        if (idObj == null || idObj == DBNull.Value) return;
+                        int id = Convert.ToInt32(idObj);
+
+                        // If there's already a pending toggle for the same id and the timer
+                        // is running, this is the second click -> cancel pending toggle and
+                        // let the DoubleClick handler run.
+                        if (_tileClickTimer != null && _tileClickTimer.Enabled && _pendingTileClickId.HasValue && _pendingTileClickId.Value == id)
+                        {
+                            _tileClickTimer.Stop();
+                            _pendingTileClickId = null;
+                            return;
+                        }
+
+                        // Otherwise start (or restart) the pending toggle timer for this id.
+                        _pendingTileClickId = id;
+                        _tileClickTimer.Stop();
+                        _tileClickTimer.Start();
+                    }
+                    catch { }
+                };
+
+                // Double click shows recommendation dialog (reuse existing method)
+                tile.DoubleClick += (s, e) =>
+                {
+                    try
+                    {
+                        // If a pending single-click toggle exists, cancel it so the double-click
+                        // doesn't cause the favorite to be toggled twice.
+                        try { if (_tileClickTimer != null && _tileClickTimer.Enabled) { _tileClickTimer.Stop(); _pendingTileClickId = null; } } catch { }
+
+                        var hi = tile.CalcHitInfo(gridControl1.PointToClient(MousePosition));
+                        if (hi == null || hi.RowHandle < 0) return;
+                        var drv = tile.GetRow(hi.RowHandle) as DataRowView;
+                        if (drv == null) return;
+                        var row = drv.Row;
+                        int id = row.Table.Columns.Contains("id") && !row.IsNull("id") ? Convert.ToInt32(row["id"]) : 0;
+                        string name = row.Table.Columns.Contains("movie_name") && !row.IsNull("movie_name") ? row.Field<string>("movie_name") : string.Empty;
+                        double rating = row.Table.Columns.Contains("rating") && !row.IsNull("rating") ? Convert.ToDouble(row["rating"]) : 0.0;
+                        string genre = row.Table.Columns.Contains("genre") && !row.IsNull("genre") ? row.Field<string>("genre") : null;
+                        ShowRecommendationDialog(name, rating, id, genre);
+                    }
+                    catch { }
+                };
+
+                // Bind data
+                gridControl1.DataSource = dt;
+                tile.RefreshData();
+
+                // Keep some helper sizing logic
+                gridControl1.SizeChanged -= GridControl1_SizeChanged_AdjustFav; gridControl1.SizeChanged += GridControl1_SizeChanged_AdjustFav;
+            }
+            catch { }
+        }
+
+        private void GridControl1_SizeChanged_AdjustFav(object? sender, EventArgs e)
+        {
+            try { AdjustFavoriteColumnWidth(); } catch { }
+        }
+
+        private void GridView_ColumnWidthChanged_AdjustFav(object? sender, DevExpress.XtraGrid.Views.Base.ColumnEventArgs e)
+        {
+            try { AdjustFavoriteColumnWidth(); } catch { }
+        }
+
+        private void AdjustFavoriteColumnWidth()
+        {
+            try
+            {
+                var gv = this.gridView1;
+                if (gv == null || gv.Columns == null || gv.GridControl == null) return;
+                var colFav = gv.Columns.FirstOrDefault(c => string.Equals(c.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase));
+                if (colFav == null) return;
+
+                int totalWidth = gv.GridControl.ClientSize.Width;
+                int reserved = gv.IndicatorWidth + SystemInformation.VerticalScrollBarWidth;
+
+                int otherColsWidth = 0;
+                foreach (DevExpress.XtraGrid.Columns.GridColumn c in gv.Columns)
+                {
+                    if (!c.Visible) continue;
+                    if (object.ReferenceEquals(c, colFav)) continue;
+                    otherColsWidth += (c.Width > 0 ? c.Width : 80);
+                }
+
+                int remaining = totalWidth - reserved - otherColsWidth;
+                // small fudge so it reaches the scrollbar edge
+                remaining += 6;
+                if (remaining < 40) remaining = 40;
+                colFav.Width = remaining;
+                gv.OptionsView.ColumnAutoWidth = false;
+            }
+            catch { }
+        }
+
+        private void gridView1_CustomUnboundColumnData(object sender, DevExpress.XtraGrid.Views.Base.CustomColumnDataEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null) return;
+                if (e.Column.FieldName == "display_id" && e.IsGetData)
+                {
+                    // If user applied an exact id filter, prefer showing the real DB id for
+                    // the rows (so typing an id in the auto-filter shows that id rather than
+                    // the sequential index). Otherwise show a sequential index that reflects
+                    // the visible order (no gaps).
+                    var view = sender as GridView;
+                    try
+                    {
+                        if (view != null)
+                        {
+                            int rowHandle = view.GetRowHandle(e.ListSourceRowIndex);
+                            // Determine if an exact id equality filter is active by inspecting the
+                            // view's ActiveFilterString. This is more robust than relying on our
+                            // separate _activeIdFilter state which can get out-of-sync.
+                            int? activeFilterId = null;
+                            try
+                            {
+                                var af = view.ActiveFilterString;
+                                if (!string.IsNullOrEmpty(af))
+                                {
+                                    var m = Regex.Match(af, "\\[id\\]\\s*=\\s*'?([0-9]+)'?");
+                                    if (m.Success && int.TryParse(m.Groups[1].Value, out int parsed)) activeFilterId = parsed;
+                                }
+                            }
+                            catch { }
+
+                            if (activeFilterId != null && rowHandle >= 0)
+                            {
+                                var idVal = view.GetRowCellValue(rowHandle, "id");
+                                if (idVal != null && idVal != DBNull.Value)
+                                {
+                                    int thisId = Convert.ToInt32(idVal);
+                                    if (thisId == activeFilterId.Value)
+                                    {
+                                        e.Value = thisId;
+                                        return;
+                                    }
+                                }
+                            }
+
+                            if (rowHandle >= 0)
+                            {
+                                int visibleIndex = view.GetVisibleIndex(rowHandle);
+                                if (visibleIndex >= 0)
+                                {
+                                    e.Value = visibleIndex + 1;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+
+                    // fallback to list source index when visible index cannot be resolved
+                    e.Value = e.ListSourceRowIndex + 1;
+                }
+            }
+            catch { }
+        }
+
+        // Hem GridView1_RowStyle hem de gridView1_RowStyle ekleniyor (küçük/büyük harf uyumu için)
+        private void GridView1_RowStyle(object sender, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
+        {
+            ApplyRatingRowStyle(sender as GridView, e);
+        }
+        private void gridView1_RowStyle(object sender, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
+        {
+            ApplyRatingRowStyle(sender as GridView, e);
+        }
+
+        private void ApplyRatingRowStyle(GridView view, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
+        {
+            try
+            {
+                if (view == null) return;
+                if (e.RowHandle < 0) return;
+                object val = view.GetRowCellValue(e.RowHandle, "rating"); double rating = 0.0; try { if (val != null && val != DBNull.Value) rating = Convert.ToDouble(val); } catch { }
+                if (rating >= 8.5) e.Appearance.BackColor = Color.FromArgb(235, 248, 236); // pastel yeşil
+                else if (rating >= 7.0) e.Appearance.BackColor = Color.FromArgb(255, 252, 230); // pastel sarı
+                else e.Appearance.BackColor = Color.FromArgb(255, 241, 243); // pastel kırmızı
+            }
+            catch { }
+        }
+
+        // Favori sütunu değiştiğinde DB'ye kaydet
+        private void GridView_CellValueChanged(object sender, DevExpress.XtraGrid.Views.Base.CellValueChangedEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null) return;
+                if (e.Column.FieldName != "is_favorite") return;
+                var view = sender as GridView; if (view == null) return;
+                var row = view.GetDataRow(e.RowHandle); if (row == null) return;
+                if (!row.Table.Columns.Contains("id") || row.IsNull("id")) return;
+                int id = Convert.ToInt32(row["id"]);
+                bool val = false; try { val = Convert.ToBoolean(e.Value); } catch { }
+                DatabaseHelper.Instance.UpdateFavoriteStatus(id, val);
+                UpdateTop5FromDataSource();
+            }
+            catch { }
+        }
+
+        // Designer'ın bağladığı click stub
+        private void gridControl1_Click(object sender, EventArgs e)
+        {
+            // Stub - gerektiğinde genişletilebilir
+        }
+
+        private void gridControl1_MouseUp(object sender, MouseEventArgs e)
+        {
+            try
+            {
+                var gc = sender as DevExpress.XtraGrid.GridControl;
+                if (gc == null) return;
+                var pt = e.Location;
+
+                // TileView: handled by tile.ItemClick handler which toggles favorite on click,
+                // so skip custom hit-area logic here to avoid relying on unavailable APIs.
+                var tile = gc.MainView as TileView;
+                if (tile != null)
+                {
+                    // Let tile.ItemClick handle toggling favorites; do not attempt to compute row bounds here.
+                    return;
+                }
+
+                // GridView: only toggle when clicking the favorite cell
+                var view = gc.MainView as GridView;
+                if (view == null) return;
+                var hiGrid = view.CalcHitInfo(pt);
+                if (hiGrid == null || hiGrid.RowHandle < 0 || hiGrid.Column == null) return;
+                if (!string.Equals(hiGrid.Column.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase)) return;
+                var idObj2 = view.GetRowCellValue(hiGrid.RowHandle, "id");
+                if (idObj2 == null || idObj2 == DBNull.Value) return;
+                int id2 = Convert.ToInt32(idObj2);
+                try
+                {
+                    bool currently = DatabaseHelper.Instance.IsFavorite(id2);
+                    DatabaseHelper.Instance.UpdateFavoriteStatus(id2, !currently);
+                }
+                catch { }
+                view.RefreshRow(hiGrid.RowHandle);
+            }
+            catch { }
+        }
+
+        private void BtnFavorites_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetFavoriteMovies();
+                gridControl1.DataSource = dt; ConfigureGrid(dt); UpdateTop5FromDataSource();
+                btnFavorites.Enabled = false; btnBackFavorites.Enabled = true;
+            }
+            catch { }
+        }
+
+        private void BtnBackFavorites_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                LoadData();
+                btnFavorites.Enabled = true; btnBackFavorites.Enabled = false;
+            }
+            catch { }
+        }
+
+        // Öneri butonu
+        private void BtnRecommend_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string ?? string.Empty;
+                // Allow "Hepsi" to work as a wildcard (request all genres)
+                if (string.Equals(sel, "Hepsi", StringComparison.OrdinalIgnoreCase)) sel = string.Empty;
+                var movie = DatabaseHelper.Instance.GetRandomMovieByGenre(sel, _lastRecommendedId);
+                if (movie == null) { XtraMessageBox.Show("Seçilen türe ait film bulunamadı.", "Bilgi"); return; }
+                _lastRecommendedId = movie.Value.id;
+
+                // Öneri dialogu
+                ShowRecommendationDialog(movie.Value.name, movie.Value.rating, movie.Value.id, sel);
+            }
+            catch { }
+        }
+
+        private void ShowRecommendationDialog(string name, double rating, int? id = null, string? genre = null)
+        {
+            using var dlg = new XtraForm();
+            // allow ESC to close the dialog
+            dlg.KeyPreview = true;
+            dlg.KeyDown += (s, e) => { try { if (e.KeyCode == System.Windows.Forms.Keys.Escape) dlg.Close(); } catch { } };
+            dlg.Text = "Film Önerisi";
+            dlg.StartPosition = FormStartPosition.CenterParent;
+            // Adjusted size to focus on title/rating and action buttons
+            dlg.Size = new Size(620, 260);
+            dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+
+            // Top area: cinematic icons and title/rating centered
+            var topPanel = new Panel { Dock = DockStyle.Top, Height = 140, BackColor = Color.FromArgb(30, 30, 30) };
+
+            // Decorative cinematic icon (simple film strip drawn into PictureBox)
+            // Create a nicer clapperboard-like icon programmatically
+            var pic = new PictureBox { Size = new Size(96, 96), Location = new Point(18, 18), SizeMode = PictureBoxSizeMode.CenterImage };
+            var bmp = new Bitmap(96, 96);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+                // body (rounded rectangle)
+                using var bodyBrush = new SolidBrush(Color.FromArgb(40, 40, 40));
+                using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+                {
+                    int x = 12, y = 30, w = 72, h = 46, r = 8;
+                    path.AddArc(x, y, r * 2, r * 2, 180, 90);
+                    path.AddArc(x + w - r * 2, y, r * 2, r * 2, 270, 90);
+                    path.AddArc(x + w - r * 2, y + h - r * 2, r * 2, r * 2, 0, 90);
+                    path.AddArc(x, y + h - r * 2, r * 2, r * 2, 90, 90);
+                    path.CloseFigure();
+                    g.FillPath(bodyBrush, path);
+                }
+                // top clapper (angled stripes)
+                using var topBrush = new SolidBrush(Color.FromArgb(60, 60, 60));
+                var topRect = new System.Drawing.Drawing2D.GraphicsPath();
+                topRect.AddPolygon(new PointF[] { new(8, 24), new(88, 12), new(84, 20), new(12, 34) });
+                g.FillPath(topBrush, topRect);
+                // stripes
+                using var stripeBrush = new SolidBrush(Color.FromArgb(200, 200, 200));
+                for (int i = 0; i < 4; i++)
+                    g.FillRectangle(stripeBrush, 16 + i * 14, 18, 8, 6);
+                // play triangle in center
+                using var playBrush = new SolidBrush(Color.FromArgb(255, 215, 64));
+                var tri = new PointF[] { new(44, 42), new(64, 50), new(44, 58) };
+                g.FillPolygon(playBrush, tri);
+                using var borderPen = new Pen(Color.FromArgb(220, 220, 220), 1f);
+                g.DrawPolygon(borderPen, tri);
+            }
+            pic.Image = bmp;
+            topPanel.Controls.Add(pic);
+
+            // Mutable state for the currently displayed suggestion so buttons operate on the latest
+            string currentName = name ?? string.Empty;
+            double currentRating = rating;
+            int? currentId = id;
+
+            var titleLbl = new Label();
+            titleLbl.Text = currentName; titleLbl.ForeColor = Color.White; titleLbl.Font = new Font("Segoe UI", 20, FontStyle.Bold);
+            titleLbl.AutoSize = false; titleLbl.TextAlign = ContentAlignment.MiddleCenter; titleLbl.Location = new Point(130, 12); titleLbl.Size = new Size(460, 52);
+            topPanel.Controls.Add(titleLbl);
+
+            var ratingLbl = new Label(); ratingLbl.Text = $"IMDb: {currentRating:0.0}"; ratingLbl.ForeColor = Color.LightGoldenrodYellow; ratingLbl.Font = new Font("Segoe UI", 14, FontStyle.Regular);
+            ratingLbl.AutoSize = false; ratingLbl.TextAlign = ContentAlignment.MiddleCenter; ratingLbl.Location = new Point(130, 70); ratingLbl.Size = new Size(460, 28);
+            topPanel.Controls.Add(ratingLbl);
+            // Bottom-right action buttons
+            var btnWatch = new DevExpress.XtraEditors.SimpleButton();
+            btnWatch.Text = "İZLE";
+            btnWatch.Size = new Size(160, 48);
+            btnWatch.Appearance.Font = new Font("Segoe UI", 12, FontStyle.Bold);
+            btnWatch.Appearance.ForeColor = Color.White;
+            try { btnWatch.Appearance.BackColor = Color.FromArgb(220, 80, 80); } catch { }
+            btnWatch.Margin = new Padding(8, 6, 8, 6);
+            // Use the current displayed movie when opening
+            btnWatch.Click += (s, e) =>
+            {
+                try
+                {
+                    var query = System.Net.WebUtility.UrlEncode(currentName + " imdb izle");
+                    var url = $"https://www.google.com/search?q={query}";
+                    Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+                }
+                catch { }
+            };
+
+            var btnAnother = new DevExpress.XtraEditors.SimpleButton();
+            btnAnother.Text = "Başka Öner";
+            // Make same size as İZLE for visual parity
+            btnAnother.Size = new Size(160, 48);
+            btnAnother.Appearance.Font = new Font("Segoe UI", 11, FontStyle.Bold);
+            btnAnother.Appearance.ForeColor = Color.White;
+            try { btnAnother.Appearance.BackColor = Color.FromArgb(40, 120, 220); } catch { }
+            btnAnother.Margin = new Padding(8, 6, 8, 6);
+            // Add a circular arrow icon to the button
+            try
+            {
+                var arrow = new Bitmap(24, 24);
+                using (var g = Graphics.FromImage(arrow))
+                {
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.Clear(Color.Transparent);
+                    using var pen = new Pen(Color.White, 2f);
+                    // draw circle arc
+                    g.DrawArc(pen, 3, 3, 18, 18, 30, 300);
+                    // draw arrow head at end
+                    var p1 = new PointF(18f, 6f);
+                    var p2 = new PointF(14f, 10f);
+                    var p3 = new PointF(20f, 10f);
+                    using var brush = new SolidBrush(Color.White);
+                    g.FillPolygon(brush, new PointF[] { p1, p2, p3 });
+                }
+                try { btnAnother.ImageOptions.Image = arrow; btnAnother.ImageOptions.ImageToTextAlignment = DevExpress.XtraEditors.ImageAlignToText.LeftCenter; } catch { btnAnother.Image = arrow; }
+            }
+            catch { }
+            // Fetch alternative suggestion (same genre if provided, or from all when genre is empty)
+            btnAnother.Click += (s, e) =>
+            {
+                try
+                {
+                    var genreToken = string.IsNullOrWhiteSpace(genre) ? string.Empty : genre;
+                    var next = DatabaseHelper.Instance.GetRandomMovieByGenre(genreToken, currentId);
+                    if (next == null)
+                    {
+                        XtraMessageBox.Show("Başka film bulunamadı.", "Bilgi");
+                        return;
+                    }
+                    // update mutable state and UI
+                    currentId = next.Value.id;
+                    currentName = next.Value.name;
+                    currentRating = next.Value.rating;
+                    titleLbl.Text = currentName;
+                    ratingLbl.Text = $"IMDb: {currentRating:0.0}";
+                }
+                catch { }
+            };
+
+            var btnLater = new DevExpress.XtraEditors.SimpleButton();
+            btnLater.Text = "Daha Sonra";
+            // match size with other action buttons for visual parity
+            btnLater.Size = new Size(160, 48);
+            btnLater.Appearance.Font = new Font("Segoe UI", 12, FontStyle.Bold);
+            btnLater.Appearance.ForeColor = Color.White;
+            try { btnLater.Appearance.BackColor = Color.FromArgb(100, 100, 100); } catch { }
+            btnLater.Margin = new Padding(8, 6, 8, 6);
+            // add a small clock-like icon on the left
+            try
+            {
+                var clock = new Bitmap(24, 24);
+                using (var g = Graphics.FromImage(clock))
+                {
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.Clear(Color.Transparent);
+                    using var pen = new Pen(Color.White, 2f);
+                    // circle
+                    g.DrawEllipse(pen, 3, 3, 18, 18);
+                    // hour hand
+                    g.DrawLine(pen, 12, 12, 12, 6);
+                    // minute hand
+                    g.DrawLine(pen, 12, 12, 17, 12);
+                }
+                try { btnLater.ImageOptions.Image = clock; btnLater.ImageOptions.ImageToTextAlignment = DevExpress.XtraEditors.ImageAlignToText.LeftCenter; } catch { btnLater.Image = clock; }
+            }
+            catch { }
+            btnLater.Click += (s, e) => dlg.Close();
+
+            // Bottom panel to host action buttons so they stay visible
+            var bottomPanel = new Panel();
+            bottomPanel.Dock = DockStyle.Bottom;
+            bottomPanel.Height = 80;
+            bottomPanel.BackColor = Color.FromArgb(245, 245, 245);
+
+            // Flow panel to hold buttons side-by-side inside bottom panel
+            var fl = new FlowLayoutPanel();
+            fl.FlowDirection = FlowDirection.LeftToRight;
+            fl.AutoSize = true;
+            fl.WrapContents = false;
+            fl.Anchor = AnchorStyles.None;
+            // add watch, another, then later so Another sits visually between
+            fl.Controls.Add(btnWatch);
+            fl.Controls.Add(btnAnother);
+            fl.Controls.Add(btnLater);
+            // place flow panel docked to right within bottom panel with padding
+            fl.Location = new Point(bottomPanel.ClientSize.Width - fl.Width - 16, (bottomPanel.Height - fl.Height) / 2);
+            fl.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
+            bottomPanel.Controls.Add(fl);
+
+            dlg.Controls.Add(topPanel);
+            dlg.Controls.Add(bottomPanel);
+
+            // adjust flow location after layout
+            dlg.Shown += (s, e) =>
+            {
+                fl.Location = new Point(bottomPanel.ClientSize.Width - fl.Width - 16, (bottomPanel.Height - fl.Height) / 2);
+            };
+
+            dlg.ShowDialog(this);
+        }
+
+        // Tür filtresi
+        private void ComboBoxGenres_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi") { LoadData(); return; }
+                var dt = DatabaseHelper.Instance.GetMoviesByGenre(sel);
+                try { if (dt != null && dt.Columns.Contains("is_favorite")) dt.Columns.Remove("is_favorite"); } catch { }
+                gridControl1.DataSource = dt; ConfigureGrid(dt); UpdateTop5FromDataSource();
+            }
+            catch { }
+        }
+
+        // ESC ile kapatma
+        private void Form1_KeyDown(object sender, KeyEventArgs e)
+        {
+            try
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    // If currently viewing favorites, ESC should go back to full list
+                    try
+                    {
+                        if (btnBackFavorites != null && btnBackFavorites.Enabled)
+                        {
+                            BtnBackFavorites_Click(null, EventArgs.Empty);
+                            return;
+                        }
+                    }
+                    catch { }
+
+                    this.Close();
+                }
+            }
+            catch { }
+        }
+
+        private void UpdateTop5FromDataSource()
+        {
+            try
+            {
+                _top5Ids.Clear(); var dt = this.gridControl1.DataSource as DataTable; if (dt == null || dt.Rows.Count == 0) return;
+                var rows = dt.AsEnumerable().OrderByDescending(r => r.Field<double?>("rating") ?? 0.0).ThenBy(r => r.Field<string>("movie_name")).Take(5);
+                foreach (var r in rows) { if (dt.Columns.Contains("id") && !r.IsNull("id")) try { _top5Ids.Add(Convert.ToInt32(r["id"])); } catch { } }
+            }
+            catch { }
+        }
+
+        private void TileClickTimer_Tick(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (_tileClickTimer != null) _tileClickTimer.Stop();
+                if (!_pendingTileClickId.HasValue) return;
+                int id = _pendingTileClickId.Value;
+                _pendingTileClickId = null;
+
+                bool currently = false;
+                try { currently = DatabaseHelper.Instance.IsFavorite(id); } catch { }
+                try { DatabaseHelper.Instance.UpdateFavoriteStatus(id, !currently); } catch { }
+
+                // Update data source star marker if present
+                try
+                {
+                    var dt = this.gridControl1.DataSource as DataTable;
+                    if (dt != null)
+                    {
+                        var r = dt.AsEnumerable().FirstOrDefault(rr => !rr.IsNull("id") && Convert.ToInt32(rr["id"]) == id);
+                        if (r != null)
+                        {
+                            r["favorite_star"] = !currently ? "★" : string.Empty;
+                        }
+                    }
+                }
+                catch { }
+
+                try { this.gridControl1.MainView?.RefreshData(); } catch { }
+                try { UpdateTop5FromDataSource(); } catch { }
+            }
+            catch { }
+        }
+
+        private void EnsureStarImages()
+        {
+            if (_emptyStar != null && _filledStar != null) return;
+            _emptyStar = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(_emptyStar))
+            {
+                g.Clear(Color.Transparent);
+                using var pen = new Pen(Color.FromArgb(140, 140, 140), 1.5f);
+                var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) };
+                g.DrawPolygon(pen, pts);
+            }
+            _filledStar = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(_filledStar))
+            {
+                g.Clear(Color.Transparent);
+                using var brush = new SolidBrush(Color.FromArgb(255, 193, 7));
+                var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) };
+                g.FillPolygon(brush, pts);
+                using var pen = new Pen(Color.FromArgb(120, 90, 0), 0.8f);
+                g.DrawPolygon(pen, pts);
+            }
+        }
+    }
+}

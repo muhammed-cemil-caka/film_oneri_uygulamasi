@@ -1,0 +1,128 @@
+-- Seed script with real movie titles and approximate IMDb ratings
+-- Run this on the 'film_db' database (pgAdmin Query Tool or psql)
+-- Note: ratings are approximate and taken for seeding/display only.
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS Movies (
+    id SERIAL PRIMARY KEY,
+    movie_name VARCHAR(255) NOT NULL,
+    genre VARCHAR(100),
+    rating DECIMAL(3,1)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_name_genre ON Movies (movie_name, genre);
+
+-- Action (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('The Dark Knight', 'Action', 9.0),
+('Inception', 'Action', 8.8),
+('Mad Max: Fury Road', 'Action', 8.1),
+('The Matrix', 'Action', 8.7),
+('Die Hard', 'Action', 8.2),
+('Gladiator', 'Action', 8.5),
+('The Raid: Redemption', 'Action', 7.6),
+('Terminator 2: Judgment Day', 'Action', 8.5),
+('John Wick', 'Action', 7.4),
+('Casino Royale', 'Action', 8.0)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Comedy (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('The Grand Budapest Hotel', 'Comedy', 8.1),
+('Groundhog Day', 'Comedy', 8.0),
+('Some Like It Hot', 'Comedy', 8.2),
+('Monty Python and the Holy Grail', 'Comedy', 8.2),
+('The Big Lebowski', 'Comedy', 8.1),
+('Superbad', 'Comedy', 7.6),
+('Hot Fuzz', 'Comedy', 7.8),
+('Airplane!', 'Comedy', 7.7),
+('Ferris Bueller''s Day Off', 'Comedy', 7.8),
+('The 40-Year-Old Virgin', 'Comedy', 7.1)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Drama (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('The Shawshank Redemption', 'Drama', 9.3),
+('The Godfather', 'Drama', 9.2),
+('Schindler''s List', 'Drama', 8.9),
+('Parasite', 'Drama', 8.6),
+('Forrest Gump', 'Drama', 8.8),
+('Fight Club', 'Drama', 8.8),
+('12 Angry Men', 'Drama', 9.0),
+('The Social Network', 'Drama', 7.7),
+('There Will Be Blood', 'Drama', 8.2),
+('Whiplash', 'Drama', 8.5)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Sci-Fi (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Interstellar', 'Sci-Fi', 8.6),
+('Blade Runner 2049', 'Sci-Fi', 8.0),
+('Arrival', 'Sci-Fi', 7.9),
+('Ex Machina', 'Sci-Fi', 7.7),
+('The Martian', 'Sci-Fi', 8.0),
+('Alien', 'Sci-Fi', 8.4),
+('Gravity', 'Sci-Fi', 7.7),
+('Moon', 'Sci-Fi', 7.9),
+('2001: A Space Odyssey', 'Sci-Fi', 8.3),
+('Minority Report', 'Sci-Fi', 7.6)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Romance (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Casablanca', 'Romance', 8.5),
+('The Notebook', 'Romance', 7.8),
+('Before Sunrise', 'Romance', 8.1),
+('La La Land', 'Romance', 8.0),
+('Titanic', 'Romance', 7.8),
+('Eternal Sunshine of the Spotless Mind', 'Romance', 8.3),
+('Romeo + Juliet', 'Romance', 6.7),
+('Atonement', 'Romance', 7.8),
+('Pride & Prejudice', 'Romance', 7.8),
+('Silver Linings Playbook', 'Romance', 7.7)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Horror (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Get Out', 'Horror', 7.7),
+('The Exorcist', 'Horror', 8.0),
+('Hereditary', 'Horror', 7.3),
+('The Shining', 'Horror', 8.4),
+('A Nightmare on Elm Street', 'Horror', 7.5),
+('It Follows', 'Horror', 6.8),
+('The Conjuring', 'Horror', 7.5),
+('Halloween', 'Horror', 7.8),
+('Suspiria', 'Horror', 7.4),
+('The Babadook', 'Horror', 6.8)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Thriller (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Se7en', 'Thriller', 8.6),
+('The Silence of the Lambs', 'Thriller', 8.6),
+('Gone Girl', 'Thriller', 8.1),
+('Prisoners', 'Thriller', 8.1),
+('Oldboy', 'Thriller', 8.4),
+('Memento', 'Thriller', 8.4),
+('Zodiac', 'Thriller', 7.7),
+('The Girl with the Dragon Tattoo', 'Thriller', 7.8),
+('No Country for Old Men', 'Thriller', 8.1),
+('Shutter Island', 'Thriller', 8.2)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Animation (10)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Spirited Away', 'Animation', 8.6),
+('Toy Story', 'Animation', 8.3),
+('Coco', 'Animation', 8.4),
+('WALL·E', 'Animation', 8.4),
+('Finding Nemo', 'Animation', 8.1),
+('Up', 'Animation', 8.2),
+('The Lion King', 'Animation', 8.5),
+('Inside Out', 'Animation', 8.1),
+('Princess Mononoke', 'Animation', 8.4),
+('How to Train Your Dragon', 'Animation', 8.1)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+COMMIT;

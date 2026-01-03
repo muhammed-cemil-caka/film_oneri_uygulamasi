@@ -1,0 +1,59 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        public Form1()
+        {
+            InitializeComponent();
+
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.GetMovies();
+                this.gridControl1.DataSource = dt;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            string conn = ConfigurationManager.ConnectionStrings["PostgresConnection"]?.ConnectionString;
+            if (string.IsNullOrWhiteSpace(conn))
+            {
+                MessageBox.Show("PostgresConnection connection string is missing in App.config.", "Configuration", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                using var connection = new NpgsqlConnection(conn);
+                connection.Open();
+                MessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Bağlantı hatası: {ex.Message}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+}

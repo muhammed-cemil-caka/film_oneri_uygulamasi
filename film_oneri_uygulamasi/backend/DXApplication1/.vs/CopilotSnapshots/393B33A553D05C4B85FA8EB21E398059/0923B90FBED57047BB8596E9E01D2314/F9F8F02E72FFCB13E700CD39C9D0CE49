@@ -1,0 +1,286 @@
+﻿using System;
+using System.Data;
+using System.Configuration;
+using Npgsql;
+using DevExpress.XtraEditors;
+using System.Windows.Forms;
+
+namespace DXApplication1
+{
+    /// <summary>
+    /// Database helper encapsulating simple read/update operations for the "movies" table.
+    /// Clean, minimal implementation keeping the existing OMDb fallback integration.
+    /// </summary>
+    public sealed class DatabaseHelper
+    {
+        private static readonly Lazy<DatabaseHelper> _instance = new(() => new DatabaseHelper());
+        public static DatabaseHelper Instance => _instance.Value;
+
+        private readonly string _connectionString;
+
+        private DatabaseHelper()
+        {
+            _connectionString = "Host=localhost;Port=5432;Username=postgres;Database=film_db";
+        }
+
+        // Returns all movies for display in the grid
+        public DataTable GetMovies()
+        {
+            var dt = new DataTable();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                // return a sequential display id (display_id) and keep the real DB id as db_id
+                using var cmd = new NpgsqlCommand("SELECT row_number() OVER (ORDER BY id) AS display_id, id AS db_id, movie_name, genre, COALESCE(rating,0.0) AS rating FROM movies ORDER BY id", conn);
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                conn.Open();
+                adapter.Fill(dt);
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı bağlantı hatası:\n{ex}", "Veritabanı Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return dt;
+        }
+
+        // Simple connection test
+        public string? TestConnection()
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+                conn.Close();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.ToString();
+            }
+        }
+
+        // Get movies that currently have no rating (NULL or 0.0)
+        public System.Collections.Generic.List<(int id, string name, int? year)> GetMoviesWithZeroRating()
+        {
+            var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE rating IS NULL OR rating = 0.0 ORDER BY id", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    int id = reader.GetInt32(0);
+                    string name = reader.GetString(1);
+                    int? year = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+                    list.Add((id, name, year));
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (listeleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return list;
+        }
+
+        // Update a single movie's rating
+        public bool UpdateMovieRating(int id, decimal rating)
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("UPDATE movies SET rating = @r WHERE id = @id", conn);
+                cmd.Parameters.AddWithValue("@r", rating);
+                cmd.Parameters.AddWithValue("@id", id);
+                conn.Open();
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (güncelleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
+        // Update ratings for all movies that have no rating using OMDb client with fallback.
+        // Returns number of updated rows, or -1 on error.
+        public int UpdateRatingsFromOmdb()
+        {
+            var apiKey = ConfigurationManager.AppSettings["OmdbApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                XtraMessageBox.Show("OMDb API anahtarı App.config içinde ayarlı değil.", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return -1;
+            }
+
+            try
+            {
+                var client = new OmdbClient(apiKey);
+                var zeros = GetMoviesWithZeroRating();
+                int updated = 0;
+
+                foreach (var (id, name, year) in zeros)
+                {
+                    // Use enhanced fallback lookup that tries multiple strategies
+                    var rating = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingWithFallbackAsync(name, year)).GetAwaiter().GetResult();
+                    if (rating != null && rating > 0)
+                    {
+                        decimal safeRating = Convert.ToDecimal(rating, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(id, safeRating)) updated++;
+                    }
+                }
+
+                return updated;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"OMDb güncelleme hatası:\n{ex}", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return -1;
+            }
+        }
+
+        // Wrapper for backward compatibility
+        public int RetryZeroRatingsFromOmdb() => UpdateRatingsFromOmdb();
+
+        // Targeted fixer for common Indiana Jones entries (exposed publicly)
+        public int FixIndianaJonesRatingsPublic()
+        {
+            int updated = 0;
+            try
+            {
+                var client = new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]);
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE (movie_name ILIKE '%iniana%' OR movie_name ILIKE '%indiana jones%') AND (rating IS NULL OR rating = 0.0)", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+                while (reader.Read()) list.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2)));
+                reader.Close();
+
+                var franchise = new[] { ("Raiders of the Lost Ark", 1981), ("Indiana Jones and the Temple of Doom", 1984), ("Indiana Jones and the Last Crusade", 1989), ("Indiana Jones and the Kingdom of the Crystal Skull", 2008) };
+                foreach (var item in list)
+                {
+                    double? found = null;
+                    foreach (var f in franchise)
+                    {
+                        var r = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r == null) r = System.Threading.Tasks.Task.Run(() => client.SearchAndGetRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r != null && r > 0) { found = r; break; }
+                    }
+
+                    if (found != null)
+                    {
+                        decimal safe = Convert.ToDecimal(found.Value, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(item.id, safe)) updated++;
+                    }
+                }
+            }
+            catch { }
+            return updated;
+        }
+
+        // Add movies from OMDb until the movies table reaches the requested total.
+        // Returns number of rows added.
+        public int AddMoviesUntilTotal(int targetTotal)
+        {
+            if (targetTotal <= 0) return 0;
+            int added = 0;
+            try
+            {
+                // count current
+                int current = 0;
+                using (var conn = new NpgsqlConnection(_connectionString))
+                using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM movies", conn))
+                {
+                    conn.Open();
+                    current = Convert.ToInt32(cmd.ExecuteScalar());
+                }
+
+                if (current >= targetTotal) return 0;
+
+                var client = new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]);
+
+                // candidate popular titles (expandable)
+                var candidates = new string[] {
+                    "The Shawshank Redemption","The Godfather","The Dark Knight","Pulp Fiction","Schindler's List",
+                    "Fight Club","Forrest Gump","Inception","The Matrix","Goodfellas","The Lord of the Rings: The Return of the King",
+                    "The Lord of the Rings: The Fellowship of the Ring","The Lord of the Rings: The Two Towers","Interstellar","Se7en",
+                    "The Silence of the Lambs","Saving Private Ryan","The Green Mile","Gladiator","The Prestige","Memento",
+                    "The Departed","Whiplash","The Lion King","The Usual Suspects","Back to the Future","Terminator 2: Judgment Day",
+                    "The Empire Strikes Back","Star Wars","Raiders of the Lost Ark","Toy Story","Spirited Away","The Shining",
+                    "Aliens","Jurassic Park","The Incredibles","WALL-E","Up","Inside Out","Coco","Mad Max: Fury Road",
+                    "The Grand Budapest Hotel","La La Land","Moonlight","Parasite","Oldboy","City of God","Pan's Labyrinth",
+                    "The Social Network","Her","Drive","Blade Runner 2049","Django Unchained","The Truman Show","American Beauty",
+                    "No Country for Old Men","There Will Be Blood","A Beautiful Mind","Catch Me If You Can","Eternal Sunshine of the Spotless Mind",
+                    "The Big Lebowski","The Wolf of Wall Street","Manchester by the Sea","Rocky","The Terminator","The Hunt",
+                    // extra titles to reach target
+                    "Catch-22","Monty Python and the Holy Grail","The Maltese Falcon","Ben-Hur","The Seventh Seal",
+                    "Rashomon","The General","Sunrise","The Battleship Potemkin","Nosferatu","The Cabinet of Dr. Caligari"
+                };
+
+                using var connection = new NpgsqlConnection(_connectionString);
+                connection.Open();
+
+                foreach (var title in candidates)
+                {
+                    if (current + added >= targetTotal) break;
+
+                    // fetch search results and pick first non-existing unique title by imdbID
+                    var search = System.Threading.Tasks.Task.Run(() => client.SearchTitlesAsync(title)).GetAwaiter().GetResult();
+                    if (search == null || search.Count == 0) continue;
+
+                    bool inserted = false;
+                    foreach (var (foundTitle, imdbId, foundYear) in search)
+                    {
+                        // skip if title already exists
+                        using (var existsCmd = new NpgsqlCommand("SELECT 1 FROM movies WHERE lower(movie_name)=lower(@name) LIMIT 1", connection))
+                        {
+                            existsCmd.Parameters.AddWithValue("@name", foundTitle);
+                            var ex = existsCmd.ExecuteScalar();
+                            if (ex != null) continue;
+                        }
+
+                        var details = System.Threading.Tasks.Task.Run(() => client.GetMovieDetailsByImdbIdAsync(imdbId)).GetAwaiter().GetResult();
+                        if (details.rating == null && details.year == null) continue;
+
+                        var genre = (details.genre ?? string.Empty).Trim();
+                        var yearObj = (object?)details.year ?? DBNull.Value;
+                        var ratingVal = details.rating.HasValue ? (object)Convert.ToDecimal(details.rating.Value, System.Globalization.CultureInfo.InvariantCulture) : (object)0m;
+
+                        // double-check uniqueness by name+genre before inserting to avoid relying on a specific DB constraint
+                        using (var existsByNameGenre = new NpgsqlCommand("SELECT 1 FROM movies WHERE lower(movie_name)=lower(@name) AND lower(COALESCE(genre,''))=lower(COALESCE(@genre,'')) LIMIT 1", connection))
+                        {
+                            existsByNameGenre.Parameters.AddWithValue("@name", foundTitle);
+                            existsByNameGenre.Parameters.AddWithValue("@genre", genre);
+                            var ex2 = existsByNameGenre.ExecuteScalar();
+                            if (ex2 != null) { inserted = true; break; }
+                        }
+
+                        using var insertCmd = new NpgsqlCommand("INSERT INTO movies(movie_name, genre, release_year, rating) VALUES(@name, @genre, @year, @rating)", connection);
+                        insertCmd.Parameters.AddWithValue("@name", foundTitle);
+                        insertCmd.Parameters.AddWithValue("@genre", genre);
+                        insertCmd.Parameters.AddWithValue("@year", yearObj);
+                        insertCmd.Parameters.AddWithValue("@rating", ratingVal);
+
+                        var rows = insertCmd.ExecuteNonQuery();
+                        if (rows > 0) { added++; inserted = true; }
+
+                    if (inserted) break;
+                    }
+
+                    // small delay to avoid hitting OMDb rate limits
+                    System.Threading.Thread.Sleep(300);
+                }
+
+                connection.Close();
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Movie import hatası: {ex}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            return added;
+        }
+    }
+}

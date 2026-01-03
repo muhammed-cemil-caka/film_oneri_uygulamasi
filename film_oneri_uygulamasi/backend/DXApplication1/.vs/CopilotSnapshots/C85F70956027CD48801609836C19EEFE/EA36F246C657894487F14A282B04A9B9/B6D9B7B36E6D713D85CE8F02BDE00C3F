@@ -1,0 +1,1339 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        // Star bitmaps used in the favorite column and flyouts
+        private Bitmap _emptyStar = null;
+        private Bitmap _filledStar = null;
+        // Reusable repository item for star icons
+        private DevExpress.XtraEditors.Repository.RepositoryItemImageComboBox _repoStar = null;
+        // Back button shown when viewing favorites
+        private DevExpress.XtraEditors.SimpleButton _btnBackFavorites = null;
+        public Form1()
+        {
+            InitializeComponent();
+            // Allow the form to receive key events (for ESC shortcut handling)
+            this.KeyPreview = true;
+            this.KeyDown += Form1_KeyDown;
+            // Make the grid fill the form
+            gridControl1.Dock = System.Windows.Forms.DockStyle.Fill;
+
+            // Configure indicator / group panel
+            gridView1.OptionsView.ShowIndicator = false; // we use an explicit unbound id column instead
+            gridView1.IndicatorWidth = 40;
+            gridView1.OptionsView.ShowGroupPanel = false;
+
+            // Wire UI events (Load/Designer already wires some handlers)
+            gridControl1.DataSourceChanged += GridControl1_DataSourceChanged;
+
+            // Add a favorites filter button next to existing recommend button (designer places btnRecommend)
+            try
+            {
+                var btnFavFilter = new DevExpress.XtraEditors.SimpleButton();
+                btnFavFilter.Name = "btnFavorites";
+                btnFavFilter.Text = "Favorilerimi Göster";
+                btnFavFilter.Size = new Size(140, 28);
+                // Place to the right of recommend if available
+                if (this.Controls.ContainsKey("btnRecommend"))
+                {
+                    var r = this.Controls["btnRecommend"];
+                    btnFavFilter.Location = new Point(r.Location.X + r.Width + 8, r.Location.Y);
+                }
+                else
+                {
+                    btnFavFilter.Location = new Point(440, 148);
+                }
+                btnFavFilter.Click += BtnFavorites_Click;
+                this.Controls.Add(btnFavFilter);
+
+                // Add a small "Geri" (Back) button next to the favorites button; hidden by default
+                try
+                {
+                    _btnBackFavorites = new DevExpress.XtraEditors.SimpleButton();
+                    _btnBackFavorites.Name = "btnBackFavorites";
+                    _btnBackFavorites.Text = "Geri";
+                    _btnBackFavorites.Size = new Size(60, 28);
+                    _btnBackFavorites.Location = new Point(btnFavFilter.Location.X + btnFavFilter.Width + 8, btnFavFilter.Location.Y);
+                    _btnBackFavorites.Visible = false;
+                    _btnBackFavorites.Click += BtnBackFavorites_Click;
+                    this.Controls.Add(_btnBackFavorites);
+                }
+                catch { }
+
+                // If designer has a recommend button, make sure its text is Turkish
+                try
+                {
+                    if (this.Controls.ContainsKey("btnRecommend"))
+                    {
+                        var r = this.Controls["btnRecommend"] as DevExpress.XtraEditors.SimpleButton;
+                        if (r != null) r.Text = "Film Öner";
+                    }
+                    // Also handle any button with English text "Recommend Movie" (search recursively)
+                    try
+                    {
+                        void SetRecommendText(Control parent)
+                        {
+                            foreach (Control ch in parent.Controls)
+                            {
+                                if (ch is DevExpress.XtraEditors.SimpleButton sb)
+                                {
+                                    if (string.Equals(sb.Text, "Recommend Movie", StringComparison.OrdinalIgnoreCase) || string.Equals(sb.Name, "btnRecommend", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        sb.Text = "Film Öner";
+                                    }
+                                }
+                                if (ch.HasChildren) SetRecommendText(ch);
+                            }
+                        }
+                        SetRecommendText(this);
+                    }
+                    catch { }
+                }
+                catch { }
+            }
+            catch { }
+
+            // draw indicator (row numbers)
+            gridView1.CustomDrawRowIndicator += (s, e) => {
+                if (e.Info.IsRowIndicator && e.RowHandle >= 0)
+                {
+                    e.Info.DisplayText = (e.RowHandle + 1).ToString(); // 1, 2, 3 diye numara verir
+                }
+            };
+
+            // Configure TileView for card UI (modern streaming-like cards)
+            try
+            {
+                SetupTileView();
+            }
+            catch { }
+        }
+
+        private int? _lastRecommendedId = null;
+        private System.Collections.Generic.HashSet<int> _top5Ids = new();
+
+        private void gridView1_CustomUnboundColumnData(object sender, DevExpress.XtraGrid.Views.Base.CustomColumnDataEventArgs e)
+        {
+            if (e.Column.FieldName == "row_no" && e.IsGetData)
+            {
+                // RowHandle may include group rows; use GetRowHandle
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view != null)
+                {
+                    int visibleIndex = view.GetRowHandle(e.ListSourceRowIndex);
+                    // visibleIndex may be negative for new items; fall back
+                    e.Value = e.ListSourceRowIndex + 1;
+                }
+            }
+        }
+
+        // legacy fetch handler removed
+
+
+        private async void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+                UpdateTop5FromDataSource();
+
+                // Populate genres combo (async-safe)
+                try
+                {
+                    var genres = DatabaseHelper.Instance.GetDistinctGenres();
+                    comboBoxGenres.Items.Clear();
+                    comboBoxGenres.Items.Add("Hepsi");
+                    foreach (var g in genres) comboBoxGenres.Items.Add(g);
+                    // Also, translate the movie_name column contents to Turkish where applicable
+                    try
+                    {
+                        var srcDt = this.gridControl1.DataSource as DataTable;
+                        if (srcDt != null)
+                        {
+                            for (int i = 0; i < srcDt.Rows.Count; i++)
+                            {
+                                var row = srcDt.Rows[i];
+                                if (srcDt.Columns.Contains("movie_name") && row["movie_name"] != DBNull.Value)
+                                {
+                                    var en = row.Field<string>("movie_name");
+                                    var tr = DatabaseHelper.Instance.GetTurkishMovieName(en);
+                                    if (!string.IsNullOrWhiteSpace(tr)) row["movie_name"] = tr;
+                                }
+                                // genre already translated in DatabaseHelper.GetMovies()
+                            }
+                        }
+                    }
+                    catch { }
+                    comboBoxGenres.SelectedIndex = 0;
+                }
+                catch { }
+
+                // On startup, automatically fetch IMDb ratings for any movies with rating = 0.0
+                try
+                {
+                    // Run on background thread to avoid blocking UI
+                    var updated = await System.Threading.Tasks.Task.Run(() => DatabaseHelper.Instance.UpdateRatingsFromOmdb());
+                    if (updated > 0)
+                    {
+                        // Refresh grid
+                        var newDt = DatabaseHelper.Instance.GetMovies();
+                        this.gridControl1.DataSource = newDt;
+                        ConfigureGrid(newDt);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // don't interrupt startup; show a warning
+                    XtraMessageBox.Show($"Otomatik puan güncellemesi sırasında hata: {ex.Message}", "Uyarı", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void GridControl1_DataSourceChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                // Hide real id column in view and translate headers if present
+                if (gridView1.Columns.Count > 0)
+                {
+                    if (gridView1.Columns["id"] != null) gridView1.Columns["id"].Visible = false;
+                    if (gridView1.Columns["movie_name"] != null) gridView1.Columns["movie_name"].Caption = "Film Adı";
+                    if (gridView1.Columns["genre"] != null) gridView1.Columns["genre"].Caption = "Tür";
+                    if (gridView1.Columns["rating"] != null) gridView1.Columns["rating"].Caption = "Puan";
+                }
+
+                UpdateTop5FromDataSource();
+            }
+            catch { }
+        }
+
+        private void BtnRecommend_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi")
+                {
+                    XtraMessageBox.Show("Lütfen önce bir tür seçin.", "Bilgi", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                var movie = DatabaseHelper.Instance.GetRandomMovieByGenre(sel, _lastRecommendedId);
+                if (movie == null)
+                {
+                    XtraMessageBox.Show("Seçilen türe ait film bulunamadı.", "Bilgi", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                _lastRecommendedId = movie.Value.id;
+
+                // Build HTML content for the dialog
+                string html = $"Sizin için seçtiğimiz film:\n<b><size=+2>{System.Security.SecurityElement.Escape(movie.Value.name)}</size></b>\n\n⭐ IMDb: <color=255,215,0><b>{movie.Value.rating:0.0}</b></color>";
+
+                // Create a lightweight XtraForm as a flyout card
+                var dlg = new DevExpress.XtraEditors.XtraForm();
+                dlg.FormBorderStyle = FormBorderStyle.FixedSingle;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.Width = 420;
+                dlg.Height = 200;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.Text = "🎬 Günün Film Önerisi";
+                dlg.ShowIcon = true;
+
+                // Apply soft background
+                dlg.Appearance.BackColor = Color.WhiteSmoke;
+                dlg.Appearance.Options.UseBackColor = true;
+
+                // Header
+                var lblHeader = new DevExpress.XtraEditors.LabelControl();
+                lblHeader.Text = "🎬 Günün Film Önerisi";
+                lblHeader.Appearance.Font = new Font("Segoe UI", 11F, FontStyle.Bold);
+                lblHeader.Appearance.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                lblHeader.Dock = DockStyle.Top;
+                lblHeader.Height = 36;
+
+                // Content (AllowHtmlString) inside a padded panel so we can size dialog to content
+                var contentPanel = new DevExpress.XtraEditors.PanelControl();
+                contentPanel.Dock = DockStyle.Fill;
+                contentPanel.BorderStyle = DevExpress.XtraEditors.Controls.BorderStyles.NoBorder;
+                contentPanel.Padding = new Padding(12);
+
+                var lblContent = new DevExpress.XtraEditors.LabelControl();
+                lblContent.AllowHtmlString = true;
+                // If the movie is already a favorite, include a star glyph in the flyout
+                bool isFav = DatabaseHelper.Instance.IsFavorite(movie.Value.id);
+                string starHtml = isFav ? " <b><color=255,193,7>★</color></b>" : string.Empty;
+                lblContent.Text = (System.Security.SecurityElement.Escape(movie.Value.name) + starHtml + "\n\n⭐ IMDb: " + movie.Value.rating.ToString("0.0")).Replace("\n", "<br/>");
+                lblContent.Appearance.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Near;
+                lblContent.Appearance.TextOptions.VAlignment = DevExpress.Utils.VertAlignment.Top;
+                lblContent.Appearance.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+                lblContent.Dock = DockStyle.Fill;
+
+                contentPanel.Controls.Add(lblContent);
+
+                // Buttons panel
+                var panel = new DevExpress.XtraEditors.PanelControl();
+                panel.Dock = DockStyle.Bottom;
+                panel.Height = 48;
+                panel.BorderStyle = DevExpress.XtraEditors.Controls.BorderStyles.NoBorder;
+
+                var btnWatch = new DevExpress.XtraEditors.SimpleButton();
+                btnWatch.Text = "İzle";
+                btnWatch.Width = 100;
+                btnWatch.Height = 30;
+                btnWatch.Click += (_, __) =>
+                {
+                    try
+                    {
+                        var url = $"https://www.google.com/search?q={Uri.EscapeDataString(movie.Value.name + " imdb")}";
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = url, UseShellExecute = true });
+                    }
+                    catch { }
+                    dlg.Close();
+                };
+
+                var btnClose = new DevExpress.XtraEditors.SimpleButton();
+                btnClose.Text = "Kapat";
+                btnClose.Width = 100;
+                btnClose.Height = 30;
+                btnClose.Click += (_, __) => dlg.Close();
+                // Make ESC close the dialog by wiring CancelButton/DialogResult
+                try { btnClose.DialogResult = DialogResult.Cancel; dlg.CancelButton = btnClose; } catch { }
+
+                // Use a FlowLayoutPanel docked to the right so buttons are neatly grouped with padding
+                // give the panel a right padding so buttons aren't flush to the edge
+                panel.Padding = new Padding(0, 0, 12, 8);
+                var flow = new FlowLayoutPanel();
+                flow.FlowDirection = FlowDirection.RightToLeft;
+                flow.Dock = DockStyle.Right;
+                flow.WrapContents = false;
+                flow.AutoSize = false;
+                flow.Margin = new Padding(0);
+                flow.Padding = new Padding(8, 6, 8, 6);
+                // set a fixed width so the flow panel doesn't hug the right edge
+                int flowWidth = btnClose.Width + btnWatch.Width + flow.Padding.Left + flow.Padding.Right + 8;
+                flow.Width = flowWidth;
+                flow.Height = panel.Height - panel.Padding.Top - panel.Padding.Bottom;
+                flow.Controls.Add(btnClose); // will appear at the rightmost
+                flow.Controls.Add(btnWatch);
+
+                panel.Controls.Add(flow);
+
+                dlg.Controls.Add(contentPanel);
+                dlg.Controls.Add(lblHeader);
+                dlg.Controls.Add(panel);
+
+                // Calculate a comfortable dialog size based on content text and screen width
+                try
+                {
+                    // Use plain text for measurement (strip HTML tags roughly)
+                    string plain = System.Text.RegularExpressions.Regex.Replace(lblContent.Text, "<.*?>", "");
+
+                    // Determine a sensible maximum width based on screen working area
+                    var screenArea = Screen.FromControl(this).WorkingArea;
+                    int screenMax = (int)(screenArea.Width * 0.8);
+                    int absoluteCap = 1200; // don't exceed this
+                    int maxWidth = Math.Min(screenMax, absoluteCap);
+
+                    // Measure text with word-wrap up to maxWidth
+                    var measured = TextRenderer.MeasureText(plain, lblContent.Appearance.Font, new Size(maxWidth, int.MaxValue), TextFormatFlags.WordBreak);
+
+                    int headerH = lblHeader.Height;
+                    int buttonsH = panel.Height;
+                    int paddingV = contentPanel.Padding.Top + contentPanel.Padding.Bottom + 32; // extra spacing
+                    int contentPaddingH = contentPanel.Padding.Left + contentPanel.Padding.Right + 48;
+
+                    // Increase minimum width to better accommodate long titles
+                    int desiredWidth = Math.Max(1000, measured.Width + contentPaddingH);
+                    if (desiredWidth > maxWidth) desiredWidth = maxWidth;
+
+                    // Ensure the full movie title can fit on a single line if possible
+                    try
+                    {
+                        string moviePlain = movie.Value.name ?? string.Empty;
+                        using var titleFont = new Font("Segoe UI", 12F, FontStyle.Bold);
+                        var titleMeasured = TextRenderer.MeasureText(moviePlain, titleFont);
+                        int titleNeeded = titleMeasured.Width + contentPaddingH + 48; // extra padding for buttons/spacing
+                        if (titleNeeded > desiredWidth)
+                        {
+                            desiredWidth = Math.Min(titleNeeded, maxWidth);
+                        }
+                    }
+                    catch { }
+
+                    int desiredHeight = headerH + buttonsH + measured.Height + paddingV;
+
+                    // Cap height to screen working area; enable scrolling if content is taller
+                    int screenMaxHeight = (int)(screenArea.Height * 0.8);
+                    bool enableScroll = false;
+                    if (desiredHeight > screenMaxHeight)
+                    {
+                        desiredHeight = screenMaxHeight;
+                        enableScroll = true;
+                    }
+
+                    dlg.ClientSize = new Size(desiredWidth, desiredHeight);
+                    dlg.FormBorderStyle = FormBorderStyle.Sizable; // allow user to resize if needed
+
+                    // Ensure the label will wrap to the computed width and allow multi-line
+                    lblContent.AutoSizeMode = DevExpress.XtraEditors.LabelAutoSizeMode.None;
+                    lblContent.MaximumSize = new Size(desiredWidth - (contentPanel.Padding.Left + contentPanel.Padding.Right) - 24, 0);
+                    if (enableScroll)
+                    {
+                        contentPanel.AutoScroll = true;
+                    }
+                }
+                catch { }
+
+                // Show as modal flyout-style dialog
+                dlg.ShowDialog(this);
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Öneri sırasında hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ConfigureGrid(DataTable dt)
+        {
+            try
+            {
+                var gv = this.gridView1;
+                gv.Columns.Clear();
+
+                // Ensure we don't attach the handler multiple times
+                gv.CustomUnboundColumnData -= gridView1_CustomUnboundColumnData;
+                gv.CustomUnboundColumnData += gridView1_CustomUnboundColumnData;
+                // RowStyle used to highlight top-5
+                gv.RowStyle -= GridView1_RowStyle;
+                gv.RowStyle += GridView1_RowStyle;
+
+                // Add a hidden DB id column (bound) so we can sort by id, then an unbound visible row number column
+                var colDbId = gv.Columns.AddVisible("id", "id");
+                colDbId.OptionsColumn.AllowEdit = false;
+                colDbId.Visible = false; // keep DB id hidden but sortable
+
+                // Add a stable, continuous row number column (unbound) used as visible id
+                var colNo = gv.Columns.AddVisible("row_no", "ID");
+                colNo.UnboundType = DevExpress.Data.UnboundColumnType.Integer;
+                colNo.OptionsColumn.AllowEdit = false;
+                colNo.Width = 45; // slightly increase ID column width
+                colNo.MinWidth = 40;
+                colNo.AppearanceCell.TextOptions.Trimming = DevExpress.Utils.Trimming.None;
+                colNo.AppearanceCell.TextOptions.VAlignment = DevExpress.Utils.VertAlignment.Center;
+                colNo.AppearanceCell.Options.UseTextOptions = true;
+                colNo.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colNo.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colNo.AppearanceCell.ForeColor = Color.Black;
+                colNo.AppearanceHeader.ForeColor = Color.Black;
+                colNo.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colNo.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+                colNo.VisibleIndex = 0;
+
+                // Remove any real DB id column if present
+                if (gv.Columns["id"] != null && gv.Columns["id"].FieldName == "id")
+                {
+                    // If a DB id column exists, remove it so unbound id is shown
+                    gv.Columns.Remove(gv.Columns["id"]);
+                }
+
+                // movie_name column
+                var colName = gv.Columns.AddVisible("movie_name", "FİLM ADI");
+                colName.OptionsColumn.AllowEdit = false;
+                colName.Width = 700; // make wide so titles fit
+                colName.AppearanceCell.ForeColor = Color.Black;
+                colName.AppearanceHeader.ForeColor = Color.Black;
+                colName.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colName.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+                colName.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Near;
+                colName.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+
+                // genre - expanded
+                var colGenre = gv.Columns.AddVisible("genre", "TÜR");
+                colGenre.OptionsColumn.AllowEdit = false;
+                colGenre.Width = 400; // widen genre column per request
+                colGenre.AppearanceCell.ForeColor = Color.Black;
+                colGenre.AppearanceHeader.ForeColor = Color.Black;
+                colGenre.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colGenre.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+                colGenre.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colGenre.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+
+                // rating - center alignment
+                var colRating = gv.Columns.AddVisible("rating", "PUAN");
+                colRating.OptionsColumn.AllowEdit = false;
+                colRating.Width = 80;
+                colRating.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colRating.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colRating.AppearanceCell.ForeColor = Color.Black;
+                colRating.AppearanceHeader.ForeColor = Color.Black;
+                colRating.AppearanceCell.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                colRating.AppearanceHeader.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+
+                // favorite checkbox column
+                if (gv.Columns["is_favorite"] == null)
+                {
+                    var colFav = gv.Columns.AddVisible("is_favorite", "Favori");
+                    // Use RepositoryItemImageComboBox for star icons
+                    EnsureStarImages();
+                    var repoImg = new DevExpress.XtraEditors.Repository.RepositoryItemImageComboBox();
+                    // ImageList for repository
+                    var imgs = new System.Windows.Forms.ImageList();
+                    imgs.ImageSize = new Size(16, 16);
+                    imgs.Images.Add(_emptyStar);
+                    imgs.Images.Add(_filledStar);
+                    repoImg.SmallImages = imgs;
+                    repoImg.Items.Add(new DevExpress.XtraEditors.Controls.ImageComboBoxItem("", false, 0));
+                    repoImg.Items.Add(new DevExpress.XtraEditors.Controls.ImageComboBoxItem("", true, 1));
+                    repoImg.GlyphAlignment = DevExpress.Utils.HorzAlignment.Center;
+                    // Hide the text editor so clicking doesn't show a dropdown or editable text
+                    repoImg.TextEditStyle = DevExpress.XtraEditors.Controls.TextEditStyles.HideTextEditor;
+                    colFav.ColumnEdit = repoImg;
+                    // Keep a reference so flyouts and other code can reuse the repo
+                    _repoStar = repoImg;
+                    // register repository to grid control so it disposes correctly
+                    if (!this.gridControl1.RepositoryItems.Contains(repoImg)) this.gridControl1.RepositoryItems.Add(repoImg);
+                    // Prevent the default combo dropdown from appearing when clicking the star.
+                    // We'll handle toggling in RowCellClick so the cell is not an editable combo box.
+                    colFav.OptionsColumn.AllowEdit = false;
+                    colFav.OptionsColumn.AllowFocus = false;
+                    colFav.Width = 60;
+                    colFav.AppearanceHeader.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                    colFav.VisibleIndex = 1; // after ID
+                }
+
+                // Ensure default sort by rating desc
+                // Sort by the DB id (ascending) so visible ID column is sequential by id
+                gv.SortInfo.Clear();
+                gv.SortInfo.Add(colDbId, DevExpress.Data.ColumnSortOrder.Ascending);
+
+                // Wire row cell style for rating coloring
+                gv.RowCellStyle -= Gv_RowCellStyle;
+                gv.RowCellStyle += Gv_RowCellStyle;
+
+                // Handle checkbox value changed
+                gv.CellValueChanged -= Gv_CellValueChanged;
+                gv.CellValueChanged += Gv_CellValueChanged;
+
+                // Handle clicks on the star icon to immediately toggle favorite state
+                gv.RowCellClick -= GridView_RowCellClick;
+                gv.RowCellClick += GridView_RowCellClick;
+
+                // Custom draw favorite cell to render star icons (avoids editor dropdown)
+                gv.CustomDrawCell -= Gv_CustomDrawCell;
+                gv.CustomDrawCell += Gv_CustomDrawCell;
+
+                // Configure view: use explicit widths and make grid fill the available area
+                gv.OptionsView.ShowIndicator = false;
+                gv.OptionsView.ColumnAutoWidth = false;
+
+                // Set application font for grid cells and headers
+                gv.Appearance.Row.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+                gv.Appearance.HeaderPanel.Font = new Font("Segoe UI", 10F, FontStyle.Bold);
+
+                // Optionally adjust column widths to fit current container
+                // (removed automatic BestFit to preserve explicit widths)
+            }
+            catch { /* ignore grid config errors */ }
+        }
+
+        // New TileView configuration for modern card UI
+        private void ConfigureTileView()
+        {
+            try
+            {
+                var tile = this.tileView1;
+                // Simplified professional card layout
+                tile.OptionsTiles.RowCount = 0; // auto
+                tile.OptionsTiles.ItemSize = new Size(250, 120);
+                tile.TileTemplate.Clear();
+
+                // Define only required columns
+                tile.Columns.Clear();
+                var colId = tile.Columns.AddField("id"); colId.Visible = false;
+                var colName = tile.Columns.AddField("movie_name"); colName.Visible = true; colName.Caption = "Film Adı";
+                var colRating = tile.Columns.AddField("rating"); colRating.Visible = false; colRating.Caption = "Puan";
+                var colFav = tile.Columns.AddField("is_favorite"); colFav.Visible = false; colFav.Caption = "Favori";
+
+                // Title element (centered)
+                var title = new DevExpress.XtraGrid.Views.Tile.TileViewItemElement();
+                title.Column = colName;
+                title.Text = "[movie_name]";
+                title.TextAlignment = DevExpress.XtraEditors.TileItemContentAlignment.MiddleCenter;
+                title.Appearance.Normal.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+                title.Appearance.Normal.ForeColor = Color.FromArgb(34, 34, 34);
+                title.RowIndex = 0;
+                title.TextLocation = new Point(0, 10);
+
+                // Rating element under title
+                var ratingElem = new DevExpress.XtraGrid.Views.Tile.TileViewItemElement();
+                ratingElem.Column = colRating;
+                ratingElem.Text = string.Empty; // set in ItemCustomize
+                ratingElem.TextAlignment = DevExpress.XtraEditors.TileItemContentAlignment.MiddleCenter;
+                ratingElem.Appearance.Normal.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                ratingElem.Appearance.Normal.ForeColor = Color.FromArgb(100, 100, 100);
+                ratingElem.RowIndex = 1;
+                ratingElem.TextLocation = new Point(0, 6);
+
+                // Favorite star in top-right
+                var favElem = new DevExpress.XtraGrid.Views.Tile.TileViewItemElement();
+                favElem.Column = colFav;
+                favElem.Text = string.Empty;
+                favElem.TextAlignment = DevExpress.XtraEditors.TileItemContentAlignment.TopRight;
+                favElem.Appearance.Normal.Font = new Font("Segoe UI", 12F, FontStyle.Regular);
+                favElem.Appearance.Normal.ForeColor = Color.FromArgb(180, 180, 180);
+                favElem.RowIndex = 0;
+                favElem.TextLocation = new Point(-8, 6);
+
+                // add title and rating elements only; favorite handled via custom draw overlay
+                tile.TileTemplate.Add(title);
+                tile.TileTemplate.Add(ratingElem);
+
+                tile.OptionsTiles.AllowPressAnimation = true;
+                tile.ItemCustomize -= Tile_ItemCustomize;
+                tile.ItemCustomize += Tile_ItemCustomize;
+                tile.ItemClick -= Tile_ItemClick;
+                tile.ItemClick += Tile_ItemClick;
+            }
+            catch { }
+        }
+
+        // Hover state tracking for TileView
+        private int _hoveredTileRow = -999;
+
+        // SetupTileView initializes global visuals and wires the tile view behavior
+        private void SetupTileView()
+        {
+            try
+            {
+                // Apply global look and font
+                try { DevExpress.LookAndFeel.UserLookAndFeel.Default.SetSkinStyle("The Bezier"); } catch { }
+                try { DevExpress.XtraEditors.WindowsFormsSettings.DefaultFont = new Font("Segoe UI", 9F); } catch { }
+
+                // Configure tile template and behavior
+                ConfigureTileView();
+
+                var tile = this.tileView1;
+
+                // Hover handling: highlight the card under mouse
+                this.gridControl1.MouseMove -= GridControl1_MouseMove_ForTileHover;
+                this.gridControl1.MouseMove += GridControl1_MouseMove_ForTileHover;
+                this.gridControl1.MouseLeave -= GridControl1_MouseLeave_ForTileHover;
+                this.gridControl1.MouseLeave += GridControl1_MouseLeave_ForTileHover;
+
+                // Ensure the TileView redraws when hover changes
+                tile.ItemCustomize -= Tile_ItemCustomize;
+                tile.ItemCustomize += Tile_ItemCustomize;
+
+                // Click handling already wired in ConfigureTileView via ItemClick
+            }
+            catch { }
+        }
+
+        private void GridControl1_MouseLeave_ForTileHover(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (_hoveredTileRow != -999)
+                {
+                    var prev = _hoveredTileRow;
+                    _hoveredTileRow = -999;
+                    try { tileView1.RefreshRow(prev); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void GridControl1_MouseMove_ForTileHover(object? sender, MouseEventArgs e)
+        {
+            try
+            {
+                var tile = this.tileView1;
+                var pt = this.gridControl1.PointToClient(Cursor.Position);
+                object hiObj = null;
+                try { hiObj = tile.CalcHitInfo(pt); } catch { hiObj = null; }
+                int row = -1;
+                try
+                {
+                    if (hiObj != null)
+                    {
+                        var prop = hiObj.GetType().GetProperty("RowHandle");
+                        if (prop != null) row = (int)prop.GetValue(hiObj);
+                    }
+                }
+                catch { row = -1; }
+                if (row != _hoveredTileRow)
+                {
+                    var prev = _hoveredTileRow;
+                    _hoveredTileRow = row;
+                    if (prev >= 0) try { tile.RefreshRow(prev); } catch { }
+                    if (_hoveredTileRow >= 0) try { tile.RefreshRow(_hoveredTileRow); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void Tile_ItemCustomize(object sender, DevExpress.XtraGrid.Views.Tile.TileViewItemCustomizeEventArgs e)
+        {
+            try
+            {
+                var view = sender as DevExpress.XtraGrid.Views.Tile.TileView;
+                if (view == null) return;
+                var ratingObj = view.GetRowCellValue(e.RowHandle, "rating");
+                double rating = 0.0;
+                try { rating = Convert.ToDouble(ratingObj); } catch { rating = 0.0; }
+
+                // Adjust rating badge color via element appearance
+                foreach (var elem in e.Item.Elements.OfType<DevExpress.XtraGrid.Views.Tile.TileViewItemElement>())
+                {
+                    try
+                    {
+                        var field = elem.Column?.FieldName ?? string.Empty;
+                        if (string.Equals(field, "rating", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // show star + rating centered
+                            elem.Text = $"⭐ {rating:0.0}";
+                            elem.Appearance.Normal.ForeColor = Color.FromArgb(70, 70, 70);
+                            elem.Appearance.Normal.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                        }
+
+                        // don't show is_favorite as text element (we'll draw overlay)
+                    }
+                    catch { }
+                }
+
+                // draw favorite star overlay using view's Graphics? Not available here — instead toggle a small label inside tile control.
+
+                // Hover effect: subtle pastel blue background and border
+                try
+                {
+                    if (e.RowHandle == _hoveredTileRow)
+                    {
+                        e.Item.Appearance.BackColor = Color.FromArgb(235, 245, 255);
+                        e.Item.Appearance.BorderColor = Color.FromArgb(180, 200, 230);
+                    }
+                    else
+                    {
+                        // reset to default subtle white
+                        e.Item.Appearance.BackColor = Color.White;
+                        e.Item.Appearance.BorderColor = Color.WhiteSmoke;
+                    }
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        private void Tile_ItemClick(object sender, DevExpress.XtraGrid.Views.Tile.TileViewItemClickEventArgs e)
+        {
+            try
+            {
+                var view = sender as DevExpress.XtraGrid.Views.Tile.TileView;
+                if (view == null) return;
+                // Determine exact hit info so we can distinguish clicks on the favorite star vs card body
+                var gridPt = this.gridControl1.PointToClient(Cursor.Position);
+                object hiObj = null;
+                try { hiObj = view.CalcHitInfo(gridPt); } catch { hiObj = null; }
+                int handle = e.Item.RowHandle;
+                if (handle < 0) return;
+
+                // If the user clicked on the favorite element/column, toggle favorite
+                try
+                {
+                    DevExpress.XtraGrid.Columns.GridColumn clickedColumn = null;
+                    if (hiObj != null)
+                    {
+                        var propCol = hiObj.GetType().GetProperty("Column");
+                        if (propCol != null)
+                        {
+                            clickedColumn = propCol.GetValue(hiObj) as DevExpress.XtraGrid.Columns.GridColumn;
+                        }
+                    }
+                    if (clickedColumn != null && string.Equals(clickedColumn.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var idObj = view.GetRowCellValue(handle, "id");
+                        if (idObj == null || idObj == DBNull.Value) return;
+                        int id = Convert.ToInt32(idObj);
+                        var favVal = view.GetRowCellValue(handle, "is_favorite");
+                        bool fav = false; try { fav = Convert.ToBoolean(favVal); } catch { fav = false; }
+                        var ok = DatabaseHelper.Instance.UpdateFavoriteStatus(id, !fav);
+                        if (ok)
+                        {
+                            view.SetRowCellValue(handle, "is_favorite", !fav);
+                            view.RefreshRow(handle);
+                            UpdateTop5FromDataSource();
+                        }
+                        return;
+                    }
+                }
+                catch { }
+
+                // Else: show the movie popup (FlyoutPanel) anchored to the card
+                try
+                {
+                    var idObj2 = view.GetRowCellValue(handle, "id");
+                    if (idObj2 == null || idObj2 == DBNull.Value) return;
+                    int id2 = Convert.ToInt32(idObj2);
+                    var name = view.GetRowCellValue(handle, "movie_name") as string ?? string.Empty;
+                    var rating = Convert.ToDouble(view.GetRowCellValue(handle, "rating") ?? 0.0);
+                    var plot = view.GetRowCellValue(handle, "plot") as string ?? string.Empty;
+                    var genre = view.GetRowCellValue(handle, "genre") as string ?? string.Empty;
+                    var favVal2 = view.GetRowCellValue(handle, "is_favorite");
+                    bool fav2 = false; try { fav2 = Convert.ToBoolean(favVal2); } catch { fav2 = false; }
+                    ShowMoviePopupOverTile(handle, name, rating, plot, genre, fav2);
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        private void ShowMoviePopupOverTile(int rowHandle, string name, double rating, string plot, string genre, bool isFav)
+        {
+            try
+            {
+                // create a PopupControlContainer anchored to the grid control
+                var popup = new DevExpress.XtraEditors.PopupContainerControl();
+                popup.BorderStyle = DevExpress.XtraEditors.Controls.BorderStyles.Simple;
+                popup.AutoSize = true;
+                popup.Padding = new Padding(8);
+
+                var panel = new DevExpress.XtraEditors.PanelControl();
+                panel.BorderStyle = DevExpress.XtraEditors.Controls.BorderStyles.NoBorder;
+                panel.Padding = new Padding(8);
+                panel.AutoSize = true;
+
+                var lblTitle = new DevExpress.XtraEditors.LabelControl();
+                lblTitle.Text = System.Security.SecurityElement.Escape(name);
+                lblTitle.Appearance.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+                lblTitle.Appearance.ForeColor = Color.FromArgb(34, 34, 34);
+                lblTitle.AutoSizeMode = DevExpress.XtraEditors.LabelAutoSizeMode.None;
+                lblTitle.MaximumSize = new Size(320, 40);
+
+                var lblGenre = new DevExpress.XtraEditors.LabelControl();
+                lblGenre.Text = "Tür: " + System.Security.SecurityElement.Escape(genre);
+                lblGenre.Appearance.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                lblGenre.Appearance.ForeColor = Color.Gray;
+                lblGenre.AutoSizeMode = DevExpress.XtraEditors.LabelAutoSizeMode.None;
+                lblGenre.MaximumSize = new Size(320, 40);
+
+                var txtPlot = new DevExpress.XtraEditors.LabelControl();
+                txtPlot.AllowHtmlString = true;
+                var safePlot = System.Security.SecurityElement.Escape(plot ?? string.Empty).Replace("\n", "<br/>");
+                if (string.IsNullOrWhiteSpace(safePlot)) safePlot = "(Açıklama yok)";
+                txtPlot.Text = safePlot;
+                txtPlot.Appearance.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
+                txtPlot.Appearance.ForeColor = Color.FromArgb(60, 60, 60);
+                txtPlot.MaximumSize = new Size(320, 220);
+                txtPlot.AutoSizeMode = DevExpress.XtraEditors.LabelAutoSizeMode.Vertical;
+
+                var btnWatch = new DevExpress.XtraEditors.SimpleButton();
+                btnWatch.Text = "İzle";
+                btnWatch.Width = 100;
+                btnWatch.Click += (_, __) =>
+                {
+                    try
+                    {
+                        var url = $"https://www.google.com/search?q={Uri.EscapeDataString(name + " imdb")}";
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = url, UseShellExecute = true });
+                    }
+                    catch { }
+                };
+
+                var btnFav = new DevExpress.XtraEditors.SimpleButton();
+                btnFav.Text = isFav ? "Favoriden Kaldır" : "Favoriye Ekle";
+                btnFav.Width = 120;
+                btnFav.Click += (_, __) =>
+                {
+                    try
+                    {
+                        var ok = DatabaseHelper.Instance.UpdateFavoriteStatus(Convert.ToInt32(rowHandle), !isFav);
+                        if (ok)
+                        {
+                            // update data source
+                            var dt = this.gridControl1.DataSource as DataTable;
+                            if (dt != null)
+                            {
+                                var rows = dt.Select($"id = {rowHandle}");
+                                foreach (var r in rows) r["is_favorite"] = !isFav;
+                                this.gridControl1.RefreshDataSource();
+                            }
+                            isFav = !isFav;
+                            btnFav.Text = isFav ? "Favoriden Kaldır" : "Favoriye Ekle";
+                        }
+                    }
+                    catch { }
+                };
+
+                panel.Controls.Add(lblTitle);
+                panel.Controls.Add(lblGenre);
+                panel.Controls.Add(txtPlot);
+                panel.Controls.Add(btnWatch);
+                panel.Controls.Add(btnFav);
+
+                popup.Controls.Add(panel);
+
+                // locate tile bounds to position popup
+                var tile = this.tileView1;
+                // Position popup near the clicked tile; use tileView GetRowBounds alternative
+                try
+                {
+                    // Fallback: request tile view visible rectangle using GetRowBounds reflection (not public on all DX versions)
+                    Rectangle bounds = Rectangle.Empty;
+                    try
+                    {
+                        var mi = tile.GetType().GetMethod("GetRowBounds", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                        if (mi != null)
+                        {
+                            var res = mi.Invoke(tile, new object[] { rowHandle });
+                            if (res is Rectangle r) bounds = r;
+                        }
+                    }
+                    catch { }
+
+                    if (bounds == Rectangle.Empty)
+                    {
+                        // approximate by showing near mouse
+                        popup.Location = this.PointToClient(Cursor.Position);
+                    }
+                    else
+                    {
+                        var pt = new Point(bounds.Left, bounds.Bottom);
+                        var screen = this.gridControl1.PointToScreen(pt);
+                        popup.Location = this.PointToClient(screen);
+                    }
+                }
+                catch
+                {
+                    popup.Location = this.PointToClient(Cursor.Position);
+                }
+                // show popup as modeless control on form
+                popup.Parent = this;
+                popup.BringToFront();
+                popup.Show();
+            }
+            catch { }
+        }
+
+        private void ShowMovieFlyout(int id, string name, double rating, string plot, bool isFav)
+        {
+            try
+            {
+                var dlg = new DevExpress.XtraEditors.XtraForm();
+                dlg.FormBorderStyle = FormBorderStyle.FixedSingle;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.Width = 420;
+                dlg.Height = 260;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.Text = name;
+                dlg.ShowIcon = true;
+                dlg.Appearance.BackColor = Color.WhiteSmoke;
+                dlg.Appearance.Options.UseBackColor = true;
+
+                var lblHeader = new DevExpress.XtraEditors.LabelControl();
+                lblHeader.Text = name;
+                lblHeader.Appearance.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+                lblHeader.Appearance.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Near;
+                lblHeader.Dock = DockStyle.Top;
+                lblHeader.Height = 36;
+
+                var contentPanel = new DevExpress.XtraEditors.PanelControl();
+                contentPanel.Dock = DockStyle.Fill;
+                contentPanel.BorderStyle = DevExpress.XtraEditors.Controls.BorderStyles.NoBorder;
+                contentPanel.Padding = new Padding(12);
+
+                var lblContent = new DevExpress.XtraEditors.LabelControl();
+                lblContent.AllowHtmlString = true;
+                string starHtml = isFav ? " <b><color=255,193,7>★</color></b>" : string.Empty;
+                var text = System.Security.SecurityElement.Escape(plot ?? string.Empty);
+                if (string.IsNullOrWhiteSpace(text)) text = "(Açıklama yok)";
+                lblContent.Text = (text + "<br/><br/>⭐ IMDb: " + rating.ToString("0.0") + starHtml).Replace("\n", "<br/>");
+                lblContent.Appearance.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Near;
+                lblContent.Appearance.TextOptions.VAlignment = DevExpress.Utils.VertAlignment.Top;
+                lblContent.Appearance.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+                lblContent.Dock = DockStyle.Fill;
+
+                contentPanel.Controls.Add(lblContent);
+
+                var panel = new DevExpress.XtraEditors.PanelControl();
+                panel.Dock = DockStyle.Bottom;
+                panel.Height = 48;
+                panel.BorderStyle = DevExpress.XtraEditors.Controls.BorderStyles.NoBorder;
+
+                var btnWatch = new DevExpress.XtraEditors.SimpleButton();
+                btnWatch.Text = "İzle";
+                btnWatch.Width = 100;
+                btnWatch.Height = 30;
+                btnWatch.Click += (_, __) =>
+                {
+                    try
+                    {
+                        var url = $"https://www.google.com/search?q={Uri.EscapeDataString(name + " imdb")}";
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = url, UseShellExecute = true });
+                    }
+                    catch { }
+                    dlg.Close();
+                };
+
+                var btnFav = new DevExpress.XtraEditors.SimpleButton();
+                btnFav.Text = isFav ? "Favoriden Kaldır" : "Favoriye Ekle";
+                btnFav.Width = 120;
+                btnFav.Height = 30;
+                btnFav.Click += (_, __) =>
+                {
+                    try
+                    {
+                        var ok = DatabaseHelper.Instance.UpdateFavoriteStatus(id, !isFav);
+                        if (ok)
+                        {
+                            // update grid datasource
+                            var dt = this.gridControl1.DataSource as DataTable;
+                            if (dt != null)
+                            {
+                                var rows = dt.Select($"id = {id}");
+                                foreach (var r in rows) r["is_favorite"] = !isFav;
+                                this.gridControl1.RefreshDataSource();
+                            }
+                            isFav = !isFav;
+                            btnFav.Text = isFav ? "Favoriden Kaldır" : "Favoriye Ekle";
+                        }
+                    }
+                    catch { }
+                };
+
+                var btnClose = new DevExpress.XtraEditors.SimpleButton();
+                btnClose.Text = "Kapat";
+                btnClose.Width = 100;
+                btnClose.Height = 30;
+                btnClose.Click += (_, __) => dlg.Close();
+
+                panel.Padding = new Padding(0, 0, 12, 8);
+                var flow = new FlowLayoutPanel();
+                flow.FlowDirection = FlowDirection.RightToLeft;
+                flow.Dock = DockStyle.Right;
+                flow.WrapContents = false;
+                flow.AutoSize = false;
+                flow.Margin = new Padding(0);
+                flow.Padding = new Padding(8, 6, 8, 6);
+                int flowWidth = btnClose.Width + btnWatch.Width + btnFav.Width + flow.Padding.Left + flow.Padding.Right + 8;
+                flow.Width = flowWidth;
+                flow.Height = panel.Height - panel.Padding.Top - panel.Padding.Bottom;
+                flow.Controls.Add(btnClose);
+                flow.Controls.Add(btnWatch);
+                flow.Controls.Add(btnFav);
+
+                panel.Controls.Add(flow);
+
+                dlg.Controls.Add(contentPanel);
+                dlg.Controls.Add(lblHeader);
+                dlg.Controls.Add(panel);
+
+                dlg.ShowDialog(this);
+            }
+            catch { }
+        }
+
+        // Draw star icon centered in the favorite cell
+        private void Gv_CustomDrawCell(object sender, DevExpress.XtraGrid.Views.Base.RowCellCustomDrawEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null || e.Column.FieldName != "is_favorite") return;
+                EnsureStarImages();
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view == null) return;
+                object val = view.GetRowCellValue(e.RowHandle, e.Column);
+                bool isFav = false;
+                try { if (val != null && val != DBNull.Value) isFav = Convert.ToBoolean(val); } catch { isFav = false; }
+
+                var img = isFav ? _filledStar : _emptyStar;
+                if (img != null)
+                {
+                    // draw background first
+                    e.Appearance.DrawBackground(e.Cache, e.Bounds);
+                    // center image
+                    int x = e.Bounds.Left + (e.Bounds.Width - img.Width) / 2;
+                    int y = e.Bounds.Top + (e.Bounds.Height - img.Height) / 2;
+                    e.Graphics.DrawImage(img, new Rectangle(x, y, img.Width, img.Height));
+                    e.Handled = true;
+                }
+            }
+            catch { }
+        }
+
+        private void UpdateTop5FromDataSource()
+        {
+            try
+            {
+                _top5Ids.Clear();
+                var dt = this.gridControl1.DataSource as DataTable;
+                if (dt == null || dt.Rows.Count == 0) return;
+
+                // Choose top 5 by rating (descending). If there's an 'id' column, use it to track rows.
+                var rows = dt.AsEnumerable()
+                             .OrderByDescending(r => r.Field<double?>("rating") ?? 0.0)
+                             .ThenBy(r => r.Field<string>("movie_name"))
+                             .Take(5);
+
+                foreach (var r in rows)
+                {
+                    if (dt.Columns.Contains("id") && !r.IsNull("id"))
+                    {
+                        try { _top5Ids.Add(Convert.ToInt32(r["id"])); } catch { }
+                    }
+                }
+                // Refresh view to trigger RowStyle
+                gridView1.RefreshData();
+            }
+            catch { }
+        }
+
+        // Handle favorite checkbox changes in grid
+        private void Gv_CellValueChanged(object sender, DevExpress.XtraGrid.Views.Base.CellValueChangedEventArgs e)
+        {
+            try
+            {
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view == null) return;
+                if (e.Column.FieldName != "is_favorite") return;
+                var row = view.GetDataRow(e.RowHandle);
+                if (row == null) return;
+                if (!row.Table.Columns.Contains("id")) return;
+                if (row.IsNull("id")) return;
+                int id = Convert.ToInt32(row["id"]);
+                bool fav = false;
+                try { fav = Convert.ToBoolean(e.Value); } catch { fav = false; }
+                DatabaseHelper.Instance.ToggleFavorite(id, fav);
+            }
+            catch { }
+        }
+
+        // When user clicks on the image cell, toggle favorite immediately
+        private void GridView_RowCellClick(object sender, DevExpress.XtraGrid.Views.Grid.RowCellClickEventArgs e)
+        {
+            try
+            {
+                if (e.Column == null || e.Column.FieldName != "is_favorite") return;
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view == null) return;
+                var row = view.GetDataRow(e.RowHandle);
+                if (row == null) return;
+                if (!row.Table.Columns.Contains("id")) return;
+                if (row.IsNull("id")) return;
+                int id = Convert.ToInt32(row["id"]);
+                bool current = false;
+                try { current = Convert.ToBoolean(row["is_favorite"]); } catch { current = false; }
+                bool newVal = !current;
+                // Persist immediately
+                var ok = DatabaseHelper.Instance.UpdateFavoriteStatus(id, newVal);
+                if (ok)
+                {
+                    // update the datasource row and refresh view
+                    row["is_favorite"] = newVal;
+                    view.RefreshRow(e.RowHandle);
+                    UpdateTop5FromDataSource();
+                }
+            }
+            catch { }
+        }
+
+        // Show only favorite movies
+        private void BtnFavorites_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetFavoriteMovies();
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+                UpdateTop5FromDataSource();
+                // Show back button so user can return to full list
+                try { if (_btnBackFavorites != null) _btnBackFavorites.Visible = true; } catch { }
+            }
+            catch { }
+        }
+
+        private void BtnBackFavorites_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+                UpdateTop5FromDataSource();
+                try { if (_btnBackFavorites != null) _btnBackFavorites.Visible = false; } catch { }
+            }
+            catch { }
+        }
+
+        private void Form1_KeyDown(object sender, KeyEventArgs e)
+        {
+            try
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    // If back button is visible, ESC should act as Back
+                    if (_btnBackFavorites != null && _btnBackFavorites.Visible)
+                    {
+                        BtnBackFavorites_Click(_btnBackFavorites, EventArgs.Empty);
+                        e.Handled = true;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Color rating cells
+        private void Gv_RowCellStyle(object sender, DevExpress.XtraGrid.Views.Grid.RowCellStyleEventArgs e)
+        {
+            try
+            {
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view == null) return;
+                if (e.Column == null || e.Column.FieldName != "rating") return;
+                var row = view.GetDataRow(e.RowHandle);
+                if (row == null) return;
+                double rating = 0.0;
+                try { rating = Convert.ToDouble(row["rating"]); } catch { rating = 0.0; }
+                // Use a soft pastel palette for ratings
+                if (rating >= 8.5)
+                {
+                    e.Appearance.BackColor = Color.FromArgb(200, 230, 201); // soft pastel green
+                    e.Appearance.ForeColor = Color.FromArgb(33, 33, 33); // dark gray for contrast
+                }
+                else if (rating >= 7.0)
+                {
+                    e.Appearance.BackColor = Color.FromArgb(255, 249, 196); // soft pastel yellow/gold
+                    e.Appearance.ForeColor = Color.FromArgb(33, 33, 33);
+                }
+                else
+                {
+                    e.Appearance.BackColor = Color.FromArgb(255, 205, 210); // soft pastel red/pink
+                    e.Appearance.ForeColor = Color.FromArgb(33, 33, 33);
+                }
+
+                // Ensure rating column is center aligned and uses Segoe UI 10pt
+                e.Appearance.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+                e.Appearance.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+            }
+            catch { }
+        }
+
+        private void EnsureStarImages()
+        {
+            if (_emptyStar != null && _filledStar != null) return;
+            // create simple star glyphs programmatically; keep them 16x16 with transparency
+            _emptyStar = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(_emptyStar))
+            {
+                g.Clear(Color.Transparent);
+                using var pen = new Pen(Color.FromArgb(120, 120, 120), 1.8f);
+                // draw a simple star-like polygon
+                var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) };
+                g.DrawPolygon(pen, pts);
+            }
+            _filledStar = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(_filledStar))
+            {
+                g.Clear(Color.Transparent);
+                using var brush = new SolidBrush(Color.FromArgb(255, 193, 7)); // warm gold
+                var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) };
+                g.FillPolygon(brush, pts);
+                using var pen = new Pen(Color.FromArgb(120, 90, 0), 0.8f);
+                g.DrawPolygon(pen, pts);
+            }
+        }
+
+        private void GridView1_RowStyle(object sender, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
+        {
+            try
+            {
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view == null) return;
+                if (e.RowHandle < 0) return;
+                var row = view.GetDataRow(e.RowHandle);
+                if (row == null) return;
+                if (!row.Table.Columns.Contains("id")) return;
+                if (row.IsNull("id")) return;
+                int id = Convert.ToInt32(row["id"]);
+                if (_top5Ids.Contains(id))
+                {
+                    e.Appearance.BackColor = Color.LightGoldenrodYellow;
+                    e.HighPriority = true;
+                }
+            }
+            catch { }
+        }
+
+        // Handle genre selection change: filter movies by genre and sort by rating desc
+        private void ComboBoxGenres_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi")
+                {
+                    this.gridControl1.DataSource = DatabaseHelper.Instance.GetMovies();
+                    ConfigureGrid((DataTable)this.gridControl1.DataSource);
+                    return;
+                }
+                // Use DatabaseHelper to fetch filtered movies
+                var dt = DatabaseHelper.Instance.GetMoviesByGenre(sel);
+                if (dt == null || dt.Rows.Count == 0)
+                {
+                    XtraMessageBox.Show($"Seçilen türe ({sel}) ait film bulunamadı.", "Bilgi", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    // Show empty table in grid
+                    this.gridControl1.DataSource = dt;
+                    ConfigureGrid(dt);
+                    UpdateTop5FromDataSource();
+                    return;
+                }
+
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+                UpdateTop5FromDataSource();
+            }
+            catch { /* ignore filter errors */ }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            var error = DatabaseHelper.Instance.TestConnection();
+            if (error == null)
+            {
+                XtraMessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                XtraMessageBox.Show($"Bağlantı hatası:\n{error}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void gridControl1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        // Manual update/progress UI removed
+    }
+}

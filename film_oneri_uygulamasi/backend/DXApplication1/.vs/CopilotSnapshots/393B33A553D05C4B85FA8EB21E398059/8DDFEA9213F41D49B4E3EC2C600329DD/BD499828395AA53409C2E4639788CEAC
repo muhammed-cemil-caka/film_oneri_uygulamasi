@@ -1,0 +1,264 @@
+﻿using System;
+using System.Data;
+using System.Configuration;
+using Npgsql;
+using DevExpress.XtraEditors;
+using System.Windows.Forms;
+
+namespace DXApplication1
+{
+    /// <summary>
+    /// Database helper encapsulating simple read/update operations for the "movies" table.
+    /// Clean, minimal implementation keeping the existing OMDb fallback integration.
+    /// </summary>
+    public sealed class DatabaseHelper
+    {
+        private static readonly Lazy<DatabaseHelper> _instance = new(() => new DatabaseHelper());
+        public static DatabaseHelper Instance => _instance.Value;
+
+        private readonly string _connectionString;
+
+        private DatabaseHelper()
+        {
+            _connectionString = "Host=localhost;Port=5432;Username=postgres;Database=film_db";
+        }
+
+        // Returns all movies for display in the grid
+        public DataTable GetMovies()
+        {
+            var dt = new DataTable();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                // return a sequential display id (display_id) and keep the real DB id as db_id
+                using var cmd = new NpgsqlCommand("SELECT row_number() OVER (ORDER BY id) AS display_id, id AS db_id, movie_name, genre, COALESCE(rating,0.0) AS rating FROM movies ORDER BY id", conn);
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                conn.Open();
+                adapter.Fill(dt);
+                // Post-process results to append Turkish translations for movie names and genres
+                try
+                {
+                    for (int i = 0; i < dt.Rows.Count; i++)
+                    {
+                        var row = dt.Rows[i];
+                        var name = row.Field<string>("movie_name");
+                        var genre = row.Field<string>("genre");
+                        var translatedName = TranslateMovieName(name);
+                        if (!string.IsNullOrWhiteSpace(translatedName))
+                            row["movie_name"] = $"{name} ({translatedName})";
+
+                        var translatedGenre = TranslateGenreList(genre);
+                        if (!string.IsNullOrWhiteSpace(translatedGenre))
+                            row["genre"] = string.IsNullOrWhiteSpace(genre) ? translatedGenre : $"{genre} ({translatedGenre})";
+                    }
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı bağlantı hatası:\n{ex}", "Veritabanı Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return dt;
+        }
+
+        // Simple connection test
+        public string? TestConnection()
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+                conn.Close();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.ToString();
+            }
+        }
+
+        // Get movies that currently have no rating (NULL or 0.0)
+        public System.Collections.Generic.List<(int id, string name, int? year)> GetMoviesWithZeroRating()
+        {
+            var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE rating IS NULL OR rating = 0.0 ORDER BY id", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    int id = reader.GetInt32(0);
+                    string name = reader.GetString(1);
+                    int? year = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+                    list.Add((id, name, year));
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (listeleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return list;
+        }
+
+        // Update a single movie's rating
+        public bool UpdateMovieRating(int id, decimal rating)
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("UPDATE movies SET rating = @r WHERE id = @id", conn);
+                cmd.Parameters.AddWithValue("@r", rating);
+                cmd.Parameters.AddWithValue("@id", id);
+                conn.Open();
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (güncelleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
+        // Update ratings for all movies that have no rating using OMDb client with fallback.
+        // Returns number of updated rows, or -1 on error.
+        public int UpdateRatingsFromOmdb()
+        {
+            var apiKey = ConfigurationManager.AppSettings["OmdbApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                XtraMessageBox.Show("OMDb API anahtarı App.config içinde ayarlı değil.", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return -1;
+            }
+
+            try
+            {
+                var client = new OmdbClient(apiKey);
+                var zeros = GetMoviesWithZeroRating();
+                int updated = 0;
+
+                foreach (var (id, name, year) in zeros)
+                {
+                    // Use enhanced fallback lookup that tries multiple strategies
+                    var rating = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingWithFallbackAsync(name, year)).GetAwaiter().GetResult();
+                    if (rating != null && rating > 0)
+                    {
+                        decimal safeRating = Convert.ToDecimal(rating, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(id, safeRating)) updated++;
+                    }
+                }
+
+                return updated;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"OMDb güncelleme hatası:\n{ex}", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return -1;
+            }
+        }
+
+        // Wrapper for backward compatibility
+        public int RetryZeroRatingsFromOmdb() => UpdateRatingsFromOmdb();
+
+        // Targeted fixer for common Indiana Jones entries (exposed publicly)
+        public int FixIndianaJonesRatingsPublic()
+        {
+            int updated = 0;
+            try
+            {
+                var client = new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]);
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE (movie_name ILIKE '%iniana%' OR movie_name ILIKE '%indiana jones%') AND (rating IS NULL OR rating = 0.0)", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+                while (reader.Read()) list.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2)));
+                reader.Close();
+
+                var franchise = new[] { ("Raiders of the Lost Ark", 1981), ("Indiana Jones and the Temple of Doom", 1984), ("Indiana Jones and the Last Crusade", 1989), ("Indiana Jones and the Kingdom of the Crystal Skull", 2008) };
+                foreach (var item in list)
+                {
+                    double? found = null;
+                    foreach (var f in franchise)
+                    {
+                        var r = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r == null) r = System.Threading.Tasks.Task.Run(() => client.SearchAndGetRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r != null && r > 0) { found = r; break; }
+                    }
+
+                    if (found != null)
+                    {
+                        decimal safe = Convert.ToDecimal(found.Value, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(item.id, safe)) updated++;
+                    }
+                }
+            }
+            catch { }
+            return updated;
+        }
+
+        // Translate a movie name to Turkish when a mapping exists. Returns empty string when no translation.
+        private string TranslateMovieName(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+            var map = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "The Shawshank Redemption", "Esaretin Bedeli" },
+                { "The Godfather", "Baba" },
+                { "The Dark Knight", "Kara Şövalye" },
+                { "Pulp Fiction", "Ucuz Roman" },
+                { "Schindler's List", "Schindler'in Listesi" },
+                { "Fight Club", "Dövüş Kulübü" },
+                { "Forrest Gump", "Forrest Gump" },
+                { "Inception", "Başlangıç" },
+                { "The Matrix", "Matrix" },
+                { "Goodfellas", "Sıkı Dostlar" },
+                { "The Lion King", "Aslan Kral" },
+                { "Back to the Future", "Geleceğe Dönüş" },
+                { "The Lord of the Rings: The Return of the King", "Yüzüklerin Efendisi: Kralın Dönüşü" },
+                { "The Lord of the Rings: The Fellowship of the Ring", "Yüzüklerin Efendisi: Yüzük Kardeşliği" },
+                { "The Lord of the Rings: The Two Towers", "Yüzüklerin Efendisi: İki Kule" },
+                { "Spider-Man: Into the Spider-Verse", "Örümcek-Adam: Örümcek Evreninde" }
+            };
+            if (map.TryGetValue(name.Trim(), out var tr)) return tr;
+            return string.Empty;
+        }
+
+        // Translate comma-separated genre list into Turkish equivalents
+        private string TranslateGenreList(string? genres)
+        {
+            if (string.IsNullOrWhiteSpace(genres)) return string.Empty;
+            var map = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Comedy", "Komedi" },
+                { "Drama", "Dram" },
+                { "Action", "Aksiyon" },
+                { "Romance", "Romantik" },
+                { "Thriller", "Gerilim" },
+                { "Horror", "Korku" },
+                { "Documentary", "Belgesel" },
+                { "Animation", "Animasyon" },
+                { "Adventure", "Macera" },
+                { "Fantasy", "Fantastik" },
+                { "Sci-Fi", "Bilim Kurgu" },
+                { "Science Fiction", "Bilim Kurgu" },
+                { "Biography", "Biyografi" },
+                { "History", "Tarih" },
+                { "Crime", "Suç" },
+                { "Mystery", "Gizem" },
+                { "Family", "Aile" },
+                { "Music", "Müzik" }
+            };
+            var parts = genres.Split(new[] { ',', '/' }, StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim()).ToArray();
+            var translated = new System.Collections.Generic.List<string>();
+            foreach (var p in parts)
+            {
+                if (map.TryGetValue(p, out var tr)) translated.Add(tr);
+                else translated.Add(string.Empty);
+            }
+            var nonEmpty = translated.Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
+            return nonEmpty.Length == 0 ? string.Empty : string.Join(", ", nonEmpty);
+        }
+    }
+}

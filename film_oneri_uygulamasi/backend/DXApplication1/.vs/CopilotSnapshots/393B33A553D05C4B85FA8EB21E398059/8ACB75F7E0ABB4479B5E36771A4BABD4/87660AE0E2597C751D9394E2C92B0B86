@@ -1,0 +1,217 @@
+﻿-- Idempotent seed script for Movies table
+-- Usage:
+-- 1) If the database 'film_db' does not exist, create it first (connect to 'postgres' or another admin DB):
+--    psql -h localhost -U postgres -d postgres -c "CREATE DATABASE film_db;"
+--    (or use pgAdmin to create the database)
+-- 2) Then run this script connected to 'film_db' (pgAdmin Query Tool or psql):
+--    psql -h localhost -U postgres -d film_db -f seed_movies.sql
+-- This script is safe to run multiple times: it creates table if missing, creates a unique index,
+-- and inserts rows using ON CONFLICT DO NOTHING to avoid duplicates.
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS Movies (
+    id SERIAL PRIMARY KEY,
+    movie_name VARCHAR(255) NOT NULL,
+    genre VARCHAR(100),
+    rating DECIMAL(3,1)
+);
+
+-- Ensure uniqueness to avoid duplicate inserts (unique on movie_name+genre)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_name_genre ON Movies (movie_name, genre);
+
+-- Insert films (ON CONFLICT DO NOTHING to avoid duplicates)
+
+-- Action (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Action Film 1', 'Action', 7.8),
+('Action Film 2', 'Action', 6.9),
+('Action Film 3', 'Action', 8.2),
+('Action Film 4', 'Action', 7.1),
+('Action Film 5', 'Action', 8.0),
+('Action Film 6', 'Action', 6.5),
+('Action Film 7', 'Action', 7.4),
+('Action Film 8', 'Action', 7.9),
+('Action Film 9', 'Action', 6.8),
+('Action Film 10', 'Action', 8.5),
+('Action Film 11', 'Action', 7.0),
+('Action Film 12', 'Action', 7.6),
+('Action Film 13', 'Action', 6.7),
+('Action Film 14', 'Action', 8.1),
+('Action Film 15', 'Action', 7.3),
+('Action Film 16', 'Action', 6.6),
+('Action Film 17', 'Action', 7.2),
+('Action Film 18', 'Action', 8.3),
+('Action Film 19', 'Action', 7.5),
+('Action Film 20', 'Action', 6.4)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Comedy (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Comedy Film 1', 'Comedy', 7.0),
+('Comedy Film 2', 'Comedy', 6.2),
+('Comedy Film 3', 'Comedy', 7.5),
+('Comedy Film 4', 'Comedy', 6.8),
+('Comedy Film 5', 'Comedy', 7.9),
+('Comedy Film 6', 'Comedy', 6.4),
+('Comedy Film 7', 'Comedy', 7.1),
+('Comedy Film 8', 'Comedy', 7.3),
+('Comedy Film 9', 'Comedy', 6.6),
+('Comedy Film 10', 'Comedy', 8.0),
+('Comedy Film 11', 'Comedy', 6.9),
+('Comedy Film 12', 'Comedy', 7.4),
+('Comedy Film 13', 'Comedy', 6.7),
+('Comedy Film 14', 'Comedy', 7.8),
+('Comedy Film 15', 'Comedy', 6.5),
+('Comedy Film 16', 'Comedy', 7.2),
+('Comedy Film 17', 'Comedy', 7.6),
+('Comedy Film 18', 'Comedy', 6.3),
+('Comedy Film 19', 'Comedy', 7.7),
+('Comedy Film 20', 'Comedy', 6.1)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Drama (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Drama Film 1', 'Drama', 8.1),
+('Drama Film 2', 'Drama', 7.4),
+('Drama Film 3', 'Drama', 8.3),
+('Drama Film 4', 'Drama', 7.0),
+('Drama Film 5', 'Drama', 8.5),
+('Drama Film 6', 'Drama', 7.2),
+('Drama Film 7', 'Drama', 6.9),
+('Drama Film 8', 'Drama', 7.8),
+('Drama Film 9', 'Drama', 7.1),
+('Drama Film 10', 'Drama', 8.0),
+('Drama Film 11', 'Drama', 7.3),
+('Drama Film 12', 'Drama', 6.8),
+('Drama Film 13', 'Drama', 8.2),
+('Drama Film 14', 'Drama', 7.6),
+('Drama Film 15', 'Drama', 6.7),
+('Drama Film 16', 'Drama', 7.5),
+('Drama Film 17', 'Drama', 8.4),
+('Drama Film 18', 'Drama', 7.9),
+('Drama Film 19', 'Drama', 6.6),
+('Drama Film 20', 'Drama', 7.7)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Sci-Fi (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Sci-Fi Film 1', 'Sci-Fi', 8.4),
+('Sci-Fi Film 2', 'Sci-Fi', 7.8),
+('Sci-Fi Film 3', 'Sci-Fi', 8.2),
+('Sci-Fi Film 4', 'Sci-Fi', 7.6),
+('Sci-Fi Film 5', 'Sci-Fi', 8.7),
+('Sci-Fi Film 6', 'Sci-Fi', 7.1),
+('Sci-Fi Film 7', 'Sci-Fi', 7.9),
+('Sci-Fi Film 8', 'Sci-Fi', 6.8),
+('Sci-Fi Film 9', 'Sci-Fi', 7.4),
+('Sci-Fi Film 10', 'Sci-Fi', 8.0),
+('Sci-Fi Film 11', 'Sci-Fi', 7.0),
+('Sci-Fi Film 12', 'Sci-Fi', 6.9),
+('Sci-Fi Film 13', 'Sci-Fi', 8.1),
+('Sci-Fi Film 14', 'Sci-Fi', 7.3),
+('Sci-Fi Film 15', 'Sci-Fi', 7.5),
+('Sci-Fi Film 16', 'Sci-Fi', 6.6),
+('Sci-Fi Film 17', 'Sci-Fi', 8.3),
+('Sci-Fi Film 18', 'Sci-Fi', 7.2),
+('Sci-Fi Film 19', 'Sci-Fi', 7.7),
+('Sci-Fi Film 20', 'Sci-Fi', 6.5)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Romance (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Romance Film 1', 'Romance', 7.2),
+('Romance Film 2', 'Romance', 6.8),
+('Romance Film 3', 'Romance', 7.6),
+('Romance Film 4', 'Romance', 7.0),
+('Romance Film 5', 'Romance', 7.9),
+('Romance Film 6', 'Romance', 6.7),
+('Romance Film 7', 'Romance', 7.4),
+('Romance Film 8', 'Romance', 7.1),
+('Romance Film 9', 'Romance', 6.5),
+('Romance Film 10', 'Romance', 8.0),
+('Romance Film 11', 'Romance', 6.6),
+('Romance Film 12', 'Romance', 7.3),
+('Romance Film 13', 'Romance', 7.7),
+('Romance Film 14', 'Romance', 6.9),
+('Romance Film 15', 'Romance', 7.8),
+('Romance Film 16', 'Romance', 6.4),
+('Romance Film 17', 'Romance', 7.5),
+('Romance Film 18', 'Romance', 7.0),
+('Romance Film 19', 'Romance', 6.3),
+('Romance Film 20', 'Romance', 7.1)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Horror (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Horror Film 1', 'Horror', 6.9),
+('Horror Film 2', 'Horror', 6.4),
+('Horror Film 3', 'Horror', 7.1),
+('Horror Film 4', 'Horror', 6.7),
+('Horror Film 5', 'Horror', 7.3),
+('Horror Film 6', 'Horror', 6.2),
+('Horror Film 7', 'Horror', 6.8),
+('Horror Film 8', 'Horror', 7.0),
+('Horror Film 9', 'Horror', 6.5),
+('Horror Film 10', 'Horror', 7.4),
+('Horror Film 11', 'Horror', 6.6),
+('Horror Film 12', 'Horror', 7.2),
+('Horror Film 13', 'Horror', 6.3),
+('Horror Film 14', 'Horror', 7.5),
+('Horror Film 15', 'Horror', 6.1),
+('Horror Film 16', 'Horror', 6.0),
+('Horror Film 17', 'Horror', 7.6),
+('Horror Film 18', 'Horror', 6.7),
+('Horror Film 19', 'Horror', 6.9),
+('Horror Film 20', 'Horror', 7.8)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Thriller (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Thriller Film 1', 'Thriller', 7.6),
+('Thriller Film 2', 'Thriller', 7.1),
+('Thriller Film 3', 'Thriller', 7.8),
+('Thriller Film 4', 'Thriller', 6.9),
+('Thriller Film 5', 'Thriller', 7.3),
+('Thriller Film 6', 'Thriller', 6.5),
+('Thriller Film 7', 'Thriller', 7.4),
+('Thriller Film 8', 'Thriller', 7.9),
+('Thriller Film 9', 'Thriller', 6.8),
+('Thriller Film 10', 'Thriller', 7.7),
+('Thriller Film 11', 'Thriller', 6.6),
+('Thriller Film 12', 'Thriller', 7.2),
+('Thriller Film 13', 'Thriller', 6.7),
+('Thriller Film 14', 'Thriller', 7.5),
+('Thriller Film 15', 'Thriller', 6.3),
+('Thriller Film 16', 'Thriller', 7.0),
+('Thriller Film 17', 'Thriller', 7.8),
+('Thriller Film 18', 'Thriller', 6.4),
+('Thriller Film 19', 'Thriller', 7.0),
+('Thriller Film 20', 'Thriller', 7.1)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+-- Animation (20)
+INSERT INTO Movies (movie_name, genre, rating) VALUES
+('Animation Film 1', 'Animation', 8.3),
+('Animation Film 2', 'Animation', 7.9),
+('Animation Film 3', 'Animation', 8.1),
+('Animation Film 4', 'Animation', 7.4),
+('Animation Film 5', 'Animation', 8.0),
+('Animation Film 6', 'Animation', 7.2),
+('Animation Film 7', 'Animation', 7.8),
+('Animation Film 8', 'Animation', 6.9),
+('Animation Film 9', 'Animation', 7.5),
+('Animation Film 10', 'Animation', 8.4),
+('Animation Film 11', 'Animation', 7.1),
+('Animation Film 12', 'Animation', 6.8),
+('Animation Film 13', 'Animation', 7.6),
+('Animation Film 14', 'Animation', 7.0),
+('Animation Film 15', 'Animation', 7.7),
+('Animation Film 16', 'Animation', 6.6),
+('Animation Film 17', 'Animation', 8.2),
+('Animation Film 18', 'Animation', 7.3),
+('Animation Film 19', 'Animation', 6.5),
+('Animation Film 20', 'Animation', 7.0)
+ON CONFLICT (movie_name, genre) DO NOTHING;
+
+COMMIT;

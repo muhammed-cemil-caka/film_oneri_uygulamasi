@@ -1,0 +1,116 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        public Form1()
+        {
+            InitializeComponent();
+
+        }
+
+        // legacy fetch handler removed
+
+
+        private async void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+
+                // On startup, automatically fetch IMDb ratings for any movies with rating = 0.0
+                try
+                {
+                    // Run on background thread to avoid blocking UI
+                    var updated = await System.Threading.Tasks.Task.Run(() => DatabaseHelper.Instance.UpdateRatingsFromOmdb());
+                    if (updated > 0)
+                    {
+                        // Refresh grid
+                        var newDt = DatabaseHelper.Instance.GetMovies();
+                        this.gridControl1.DataSource = newDt;
+                        ConfigureGrid(newDt);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // don't interrupt startup; show a warning
+                    XtraMessageBox.Show($"Otomatik puan güncellemesi sırasında hata: {ex.Message}", "Uyarı", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ConfigureGrid(DataTable dt)
+        {
+            try
+            {
+                var gv = this.gridView1;
+                gv.Columns.Clear();
+
+                // display_id column (sequential)
+                var colDisplay = gv.Columns.AddVisible("display_id", "id");
+                colDisplay.Width = 60;
+                colDisplay.OptionsColumn.AllowEdit = false;
+
+                // real db id (hidden)
+                var colDbId = gv.Columns.AddVisible("db_id", "db_id");
+                colDbId.Visible = true;
+                colDbId.Width = 60;
+                colDbId.OptionsColumn.AllowEdit = false;
+
+                // movie_name
+                var colName = gv.Columns.AddVisible("movie_name", "movie_name");
+                colName.OptionsColumn.AllowEdit = false;
+                colName.Width = 300;
+
+                // genre
+                var colGenre = gv.Columns.AddVisible("genre", "genre");
+                colGenre.OptionsColumn.AllowEdit = false;
+                colGenre.Width = 150;
+
+                // rating - center alignment
+                var colRating = gv.Columns.AddVisible("rating", "rating");
+                colRating.OptionsColumn.AllowEdit = false;
+                colRating.Width = 80;
+                colRating.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+
+                gv.OptionsView.ShowIndicator = false;
+                gv.BestFitColumns();
+            }
+            catch { /* ignore grid config errors */ }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            var error = DatabaseHelper.Instance.TestConnection();
+            if (error == null)
+            {
+                XtraMessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                XtraMessageBox.Show($"Bağlantı hatası:\n{error}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Manual update/progress UI removed
+    }
+}

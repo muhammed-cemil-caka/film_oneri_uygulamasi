@@ -1,0 +1,290 @@
+﻿using System;
+using System.Data;
+using System.Configuration;
+using Npgsql;
+using DevExpress.XtraEditors;
+using System.Windows.Forms;
+
+namespace DXApplication1
+{
+    /// <summary>
+    /// Database helper encapsulating simple read/update operations for the "movies" table.
+    /// Clean, minimal implementation keeping the existing OMDb fallback integration.
+    /// </summary>
+    public sealed class DatabaseHelper
+    {
+        private static readonly Lazy<DatabaseHelper> _instance = new(() => new DatabaseHelper());
+        public static DatabaseHelper Instance => _instance.Value;
+
+        private readonly string _connectionString;
+
+        private DatabaseHelper()
+        {
+            _connectionString = "Host=localhost;Port=5432;Username=postgres;Database=film_db";
+        }
+
+        // Returns all movies for display in the grid
+        public DataTable GetMovies()
+        {
+            var dt = new DataTable();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                // return a sequential display id (display_id) and keep the real DB id as db_id
+                using var cmd = new NpgsqlCommand("SELECT row_number() OVER (ORDER BY id) AS display_id, id AS db_id, movie_name, genre, COALESCE(rating,0.0) AS rating FROM movies ORDER BY id", conn);
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                conn.Open();
+                adapter.Fill(dt);
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı bağlantı hatası:\n{ex}", "Veritabanı Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return dt;
+        }
+
+        // Simple connection test
+        public string? TestConnection()
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+                conn.Close();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.ToString();
+            }
+        }
+
+        // Get movies that currently have no rating (NULL or 0.0)
+        public System.Collections.Generic.List<(int id, string name, int? year)> GetMoviesWithZeroRating()
+        {
+            var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE rating IS NULL OR rating = 0.0 ORDER BY id", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    int id = reader.GetInt32(0);
+                    string name = reader.GetString(1);
+                    int? year = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+                    list.Add((id, name, year));
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (listeleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return list;
+        }
+
+        // Update a single movie's rating
+        public bool UpdateMovieRating(int id, decimal rating)
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("UPDATE movies SET rating = @r WHERE id = @id", conn);
+                cmd.Parameters.AddWithValue("@r", rating);
+                cmd.Parameters.AddWithValue("@id", id);
+                conn.Open();
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (güncelleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
+        // Update ratings for all movies that have no rating using OMDb client with fallback.
+        // Returns number of updated rows, or -1 on error.
+        public int UpdateRatingsFromOmdb()
+        {
+            var apiKey = ConfigurationManager.AppSettings["OmdbApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                XtraMessageBox.Show("OMDb API anahtarı App.config içinde ayarlı değil.", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return -1;
+            }
+
+            try
+            {
+                var client = new OmdbClient(apiKey);
+                var zeros = GetMoviesWithZeroRating();
+                int updated = 0;
+
+                foreach (var (id, name, year) in zeros)
+                {
+                    // Use enhanced fallback lookup that tries multiple strategies
+                    var rating = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingWithFallbackAsync(name, year)).GetAwaiter().GetResult();
+                    if (rating != null && rating > 0)
+                    {
+                        decimal safeRating = Convert.ToDecimal(rating, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(id, safeRating)) updated++;
+                    }
+                }
+
+                return updated;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"OMDb güncelleme hatası:\n{ex}", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return -1;
+            }
+        }
+
+        // Wrapper for backward compatibility
+        public int RetryZeroRatingsFromOmdb() => UpdateRatingsFromOmdb();
+
+        // Targeted fixer for common Indiana Jones entries (exposed publicly)
+        public int FixIndianaJonesRatingsPublic()
+        {
+            int updated = 0;
+            try
+            {
+                var client = new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]);
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE (movie_name ILIKE '%iniana%' OR movie_name ILIKE '%indiana jones%') AND (rating IS NULL OR rating = 0.0)", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+                while (reader.Read()) list.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2)));
+                reader.Close();
+
+                var franchise = new[] { ("Raiders of the Lost Ark", 1981), ("Indiana Jones and the Temple of Doom", 1984), ("Indiana Jones and the Last Crusade", 1989), ("Indiana Jones and the Kingdom of the Crystal Skull", 2008) };
+                foreach (var item in list)
+                {
+                    double? found = null;
+                    foreach (var f in franchise)
+                    {
+                        var r = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r == null) r = System.Threading.Tasks.Task.Run(() => client.SearchAndGetRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r != null && r > 0) { found = r; break; }
+                    }
+
+                    if (found != null)
+                    {
+                        decimal safe = Convert.ToDecimal(found.Value, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(item.id, safe)) updated++;
+                    }
+                }
+            }
+            catch { }
+            return updated;
+        }
+
+        // Add movies from OMDb until the movies table reaches the requested total.
+        // Returns number of rows added.
+        public int AddMoviesUntilTotal(int targetTotal)
+        {
+            if (targetTotal <= 0) return 0;
+            int added = 0;
+            try
+            {
+                // count current
+                int current = 0;
+                using (var conn = new NpgsqlConnection(_connectionString))
+                using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM movies", conn))
+                {
+                    conn.Open();
+                    current = Convert.ToInt32(cmd.ExecuteScalar());
+                }
+
+                if (current >= targetTotal) return 0;
+
+                var client = new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]);
+
+                // dynamic search: iterate over letters/pages to discover many unique titles via OMDb search
+                using var connection = new NpgsqlConnection(_connectionString);
+                connection.Open();
+
+                // load existing movie names into hashset for fast checks
+                var existing = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                using (var exCmd = new NpgsqlCommand("SELECT movie_name FROM movies", connection))
+                using (var rdr = exCmd.ExecuteReader())
+                {
+                    while (rdr.Read()) existing.Add(rdr.GetString(0));
+                }
+
+                var addedNames = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                var queries = new System.Collections.Generic.List<string>();
+                // single letters a-z
+                for (char c = 'a'; c <= 'z'; c++) queries.Add(c.ToString());
+                // digits
+                for (char c = '0'; c <= '9'; c++) queries.Add(c.ToString());
+                // some common words
+                queries.AddRange(new[] { "the", "a", "love", "war", "life", "man", "woman", "dark", "night", "day", "king", "queen", "dead", "last", "first", "new", "old" });
+
+                foreach (var q in queries)
+                {
+                    for (int page = 1; page <= 10; page++)
+                    {
+                        if (current + added >= targetTotal) break;
+                        var results = System.Threading.Tasks.Task.Run(() => client.SearchTitlesAsync(q, page)).GetAwaiter().GetResult();
+                        if (results == null || results.Count == 0) break;
+
+                        foreach (var (foundTitle, imdbId, foundYear) in results)
+                        {
+                            if (current + added >= targetTotal) break;
+                            if (existing.Contains(foundTitle) || addedNames.Contains(foundTitle)) continue;
+
+                            var details = System.Threading.Tasks.Task.Run(() => client.GetMovieDetailsByImdbIdAsync(imdbId)).GetAwaiter().GetResult();
+                            if (details.rating == null && details.year == null) continue;
+
+                            var genre = (details.genre ?? string.Empty).Trim();
+                            var yearObj = (object?)details.year ?? DBNull.Value;
+                            var ratingVal = details.rating.HasValue ? (object)Convert.ToDecimal(details.rating.Value, System.Globalization.CultureInfo.InvariantCulture) : (object)0m;
+
+                            // double-check uniqueness by name+genre
+                            using (var existsByNameGenre = new NpgsqlCommand("SELECT 1 FROM movies WHERE lower(movie_name)=lower(@name) AND lower(COALESCE(genre,''))=lower(COALESCE(@genre,'')) LIMIT 1", connection))
+                            {
+                                existsByNameGenre.Parameters.AddWithValue("@name", foundTitle);
+                                existsByNameGenre.Parameters.AddWithValue("@genre", genre);
+                                var ex2 = existsByNameGenre.ExecuteScalar();
+                                if (ex2 != null) { existing.Add(foundTitle); continue; }
+                            }
+
+                            using var insertCmd = new NpgsqlCommand("INSERT INTO movies(movie_name, genre, release_year, rating) VALUES(@name, @genre, @year, @rating)", connection);
+                            insertCmd.Parameters.AddWithValue("@name", foundTitle);
+                            insertCmd.Parameters.AddWithValue("@genre", genre);
+                            insertCmd.Parameters.AddWithValue("@year", yearObj);
+                            insertCmd.Parameters.AddWithValue("@rating", ratingVal);
+
+                            try
+                            {
+                                var rows = insertCmd.ExecuteNonQuery();
+                                if (rows > 0)
+                                {
+                                    added++;
+                                    addedNames.Add(foundTitle);
+                                    existing.Add(foundTitle);
+                                }
+                            }
+                            catch (PostgresException) { /* skip duplicates or other PG issues */ }
+
+                            // small delay to avoid hitting OMDb rate limits
+                            System.Threading.Thread.Sleep(300);
+                        }
+                    }
+                    if (current + added >= targetTotal) break;
+                }
+
+                connection.Close();
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Movie import hatası: {ex}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            return added;
+        }
+    }
+}

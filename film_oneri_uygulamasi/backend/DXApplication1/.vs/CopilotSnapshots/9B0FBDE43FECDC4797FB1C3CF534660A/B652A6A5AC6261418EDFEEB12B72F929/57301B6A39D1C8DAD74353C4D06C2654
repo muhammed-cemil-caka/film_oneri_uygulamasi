@@ -1,0 +1,149 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        public Form1()
+        {
+            InitializeComponent();
+
+        }
+
+        private void gridView1_CustomUnboundColumnData(object sender, DevExpress.XtraGrid.Views.Base.CustomColumnDataEventArgs e)
+        {
+            if (e.Column.FieldName == "row_no" && e.IsGetData)
+            {
+                // RowHandle may include group rows; use GetRowHandle
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view != null)
+                {
+                    int visibleIndex = view.GetRowHandle(e.ListSourceRowIndex);
+                    // visibleIndex may be negative for new items; fall back
+                    e.Value = e.ListSourceRowIndex + 1;
+                }
+            }
+        }
+
+        // legacy fetch handler removed
+
+
+        private async void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+
+                // On startup, automatically fetch IMDb ratings for any movies with rating = 0.0
+                try
+                {
+                    // Run on background thread to avoid blocking UI
+                    var updated = await System.Threading.Tasks.Task.Run(() => DatabaseHelper.Instance.UpdateRatingsFromOmdb());
+                    if (updated > 0)
+                    {
+                        // Refresh grid
+                        var newDt = DatabaseHelper.Instance.GetMovies();
+                        this.gridControl1.DataSource = newDt;
+                        ConfigureGrid(newDt);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // don't interrupt startup; show a warning
+                    XtraMessageBox.Show($"Otomatik puan güncellemesi sırasında hata: {ex.Message}", "Uyarı", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ConfigureGrid(DataTable dt)
+        {
+            try
+            {
+                var gv = this.gridView1;
+                gv.Columns.Clear();
+
+                // Ensure we don't attach the handler multiple times
+                gv.CustomUnboundColumnData -= gridView1_CustomUnboundColumnData;
+                gv.CustomUnboundColumnData += gridView1_CustomUnboundColumnData;
+
+                // Add a stable, continuous row number column (unbound)
+                var colNo = gv.Columns.AddVisible("row_no", "#");
+                colNo.UnboundType = DevExpress.Data.UnboundColumnType.Integer;
+                colNo.OptionsColumn.AllowEdit = false;
+                colNo.Width = 50;
+                colNo.AppearanceCell.Options.UseTextOptions = true;
+                colNo.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colNo.VisibleIndex = 0;
+
+                // show real DB id as separate column
+                var colDbId = gv.Columns.AddVisible("id", "id");
+                colDbId.Visible = true;
+                colDbId.Width = 60;
+                colDbId.OptionsColumn.AllowEdit = false;
+                colDbId.VisibleIndex = 1;
+
+                // movie_name
+                var colName = gv.Columns.AddVisible("movie_name", "movie_name");
+                colName.OptionsColumn.AllowEdit = false;
+                colName.Width = 300;
+
+                // genre
+                var colGenre = gv.Columns.AddVisible("genre", "genre");
+                colGenre.OptionsColumn.AllowEdit = false;
+                colGenre.Width = 150;
+
+                // rating - center alignment
+                var colRating = gv.Columns.AddVisible("rating", "rating");
+                colRating.OptionsColumn.AllowEdit = false;
+                colRating.Width = 80;
+                colRating.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+
+                // Keep the indicator hidden and prevent automatic column resizing which
+                // can cause numeric id cells to be trimmed and displayed as "...".
+                gv.OptionsView.ShowIndicator = false;
+                gv.OptionsView.ColumnAutoWidth = false;
+
+                // Ensure id column displays numbers without trimming/ellipsis
+                colDbId.AppearanceCell.Options.UseTextOptions = true;
+                colDbId.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colDbId.DisplayFormat.FormatType = DevExpress.Utils.FormatType.Numeric;
+                colDbId.DisplayFormat.FormatString = "0";
+                colDbId.MinWidth = 40;
+            }
+            catch { /* ignore grid config errors */ }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            var error = DatabaseHelper.Instance.TestConnection();
+            if (error == null)
+            {
+                XtraMessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                XtraMessageBox.Show($"Bağlantı hatası:\n{error}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Manual update/progress UI removed
+    }
+}

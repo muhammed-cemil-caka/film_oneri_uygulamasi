@@ -1,0 +1,149 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        public Form1()
+        {
+            InitializeComponent();
+
+        }
+
+        private async void btnRetryZeroRatings_Click(object sender, EventArgs e)
+        {
+            btnRetryZeroRatings.Enabled = false;
+            try
+            {
+                var zeros = DatabaseHelper.Instance.GetMoviesWithZeroRating();
+                int total = zeros.Count;
+                if (total == 0)
+                {
+                    XtraMessageBox.Show("Sıfır puanlı film bulunamadı.", "Bilgi", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                progressBar.Minimum = 0;
+                progressBar.Maximum = total;
+                progressBar.Value = 0;
+
+                int updated = 0;
+                var client = new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]);
+                for (int i = 0; i < total; i++)
+                {
+                    var item = zeros[i];
+                    var rating = await client.GetImdbRatingAsync(item.name);
+                    if (rating != null && rating > 0)
+                    {
+                        decimal safeRating = Convert.ToDecimal(rating, System.Globalization.CultureInfo.InvariantCulture);
+                        if (DatabaseHelper.Instance.UpdateMovieRating(item.id, safeRating)) updated++;
+                    }
+
+                    progressBar.Value = i + 1;
+                    lblProgress.Text = $"Retry {i + 1}/{total}";
+                    Application.DoEvents();
+                }
+
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                XtraMessageBox.Show($"Retry tamamlandı. Güncellenen: {updated}", "Bilgi", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Retry hatası: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                btnRetryZeroRatings.Enabled = true;
+            }
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            var error = DatabaseHelper.Instance.TestConnection();
+            if (error == null)
+            {
+                XtraMessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                XtraMessageBox.Show($"Bağlantı hatası:\n{error}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async void btnUpdateRatings_Click(object sender, EventArgs e)
+        {
+            btnUpdateRatings.Enabled = false;
+            try
+            {
+                var list = DatabaseHelper.Instance.GetMoviesWithZeroRating();
+                int total = list.Count;
+                if (total == 0)
+                {
+                    XtraMessageBox.Show("Güncellenecek film bulunamadı (rating=0.0).", "OMDb", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                progressBar.Minimum = 0;
+                progressBar.Maximum = total;
+                progressBar.Value = 0;
+
+                int updated = 0;
+                for (int i = 0; i < total; i++)
+                {
+                    var item = list[i];
+                    // call OMDb asynchronously
+                    var rating = await new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]).GetImdbRatingAsync(item.name);
+                    if (rating != null)
+                    {
+                        decimal safeRating = Convert.ToDecimal(rating, System.Globalization.CultureInfo.InvariantCulture);
+                        var ok = DatabaseHelper.Instance.UpdateMovieRating(item.id, safeRating);
+                        if (ok) updated++;
+                    }
+
+                    // update UI progress
+                    progressBar.Value = i + 1;
+                    lblProgress.Text = $"{i + 1}/{total} güncellendi";
+                    Application.DoEvents();
+                }
+
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                XtraMessageBox.Show($"Güncelleme tamamlandı. Güncellenen satır sayısı: {updated}", "OMDb", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Güncelleme sırasında hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                btnUpdateRatings.Enabled = true;
+            }
+        }
+    }
+}

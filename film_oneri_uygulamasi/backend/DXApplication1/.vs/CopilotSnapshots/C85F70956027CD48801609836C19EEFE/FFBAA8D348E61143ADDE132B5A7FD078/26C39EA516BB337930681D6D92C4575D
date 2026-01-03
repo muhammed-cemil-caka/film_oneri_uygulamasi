@@ -1,0 +1,318 @@
+﻿using System;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Windows.Forms;
+using DevExpress.XtraEditors;
+using DevExpress.XtraGrid.Views.Tile;
+using DevExpress.XtraGrid.Columns;
+using DevExpress.Utils;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        // star icons
+        private Bitmap _emptyStar;
+        private Bitmap _filledStar;
+
+        public Form1()
+        {
+            InitializeComponent();
+            this.KeyPreview = true;
+            this.KeyDown += Form1_KeyDown;
+
+            EnsureStarImages();
+            SetupTileView();
+            LoadData();
+        }
+
+        // Load data into grid control
+        private void LoadData()
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                // ensure TileView is active view
+                try { this.gridControl1.MainView = this.tileView1; } catch { }
+                try { this.tileView1.RefreshData(); } catch { }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Setup TileView template and wiring
+        private void SetupTileView()
+        {
+            try
+            {
+                var tile = this.tileView1;
+                if (tile == null) return;
+
+                tile.TileTemplate.Clear();
+                tile.OptionsTiles.ItemSize = new Size(250, 150);
+                tile.OptionsTiles.RowCount = 0; // auto
+
+                // Ensure columns exist
+                tile.Columns.Clear();
+                var colId = tile.Columns.AddField("id"); colId.Visible = false;
+                var colName = tile.Columns.AddField("movie_name"); colName.Visible = true; colName.Caption = "Film Adı";
+                var colRating = tile.Columns.AddField("rating"); colRating.Visible = false;
+                var colFav = tile.Columns.AddField("is_favorite"); colFav.Visible = false;
+
+                // Movie name (centered, bold)
+                var title = new TileViewItemElement() { Column = colName };
+                title.Text = "[movie_name]";
+                title.TextAlignment = TileItemContentAlignment.MiddleCenter;
+                title.Appearance.Normal.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+                title.Appearance.Normal.ForeColor = Color.FromArgb(34, 34, 34);
+                title.RowIndex = 0;
+                title.TextLocation = new Point(0, 8);
+
+                // Rating under title
+                var ratingElem = new TileViewItemElement() { Column = colRating };
+                ratingElem.Text = string.Empty; // filled in customize
+                ratingElem.TextAlignment = TileItemContentAlignment.MiddleCenter;
+                ratingElem.Appearance.Normal.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+                ratingElem.Appearance.Normal.ForeColor = Color.FromArgb(80, 80, 80);
+                ratingElem.RowIndex = 1;
+                ratingElem.TextLocation = new Point(0, 6);
+
+                // Favorite star element (top-right)
+                var favElem = new TileViewItemElement() { Column = colFav };
+                favElem.Text = string.Empty;
+                favElem.TextAlignment = TileItemContentAlignment.TopRight;
+                favElem.Appearance.Normal.Font = new Font("Segoe UI", 12F, FontStyle.Regular);
+                favElem.Appearance.Normal.ForeColor = Color.FromArgb(160, 160, 160);
+                favElem.RowIndex = 0;
+                favElem.TextLocation = new Point(-8, 6);
+
+                tile.TileTemplate.Add(title);
+                tile.TileTemplate.Add(ratingElem);
+                tile.TileTemplate.Add(favElem);
+
+                tile.OptionsTiles.AllowPressAnimation = true;
+
+                tile.ItemCustomize -= Tile_ItemCustomize;
+                tile.ItemCustomize += Tile_ItemCustomize;
+
+                tile.ItemClick -= Tile_ItemClick;
+                tile.ItemClick += Tile_ItemClick;
+            }
+            catch { }
+        }
+
+        // Customize each item: set texts and pastel backgrounds
+        private void Tile_ItemCustomize(object sender, TileViewItemCustomizeEventArgs e)
+        {
+            try
+            {
+                var view = sender as TileView;
+                if (view == null) return;
+
+                double rating = 0.0;
+                try { rating = Convert.ToDouble(view.GetRowCellValue(e.RowHandle, "rating") ?? 0.0); } catch { }
+
+                foreach (var elem in e.Item.Elements.OfType<TileViewItemElement>())
+                {
+                    try
+                    {
+                        if (elem.Column != null && string.Equals(elem.Column.FieldName, "movie_name", StringComparison.OrdinalIgnoreCase))
+                        {
+                            elem.Text = Convert.ToString(view.GetRowCellValue(e.RowHandle, "movie_name")) ?? string.Empty;
+                            elem.Appearance.Normal.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+                            elem.Appearance.Normal.ForeColor = Color.FromArgb(34, 34, 34);
+                            elem.TextAlignment = TileItemContentAlignment.MiddleCenter;
+                        }
+                        else if (elem.RowIndex == 1)
+                        {
+                            elem.Text = $"⭐ {rating:0.0}";
+                            elem.Appearance.Normal.ForeColor = Color.FromArgb(80, 80, 80);
+                            elem.TextAlignment = TileItemContentAlignment.MiddleCenter;
+                        }
+                        else if (elem.Column != null && string.Equals(elem.Column.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var favVal = view.GetRowCellValue(e.RowHandle, "is_favorite");
+                            bool fav = false; try { fav = Convert.ToBoolean(favVal); } catch { fav = false; }
+                            elem.Text = fav ? "★" : "☆";
+                            elem.Appearance.Normal.ForeColor = fav ? Color.FromArgb(255, 193, 7) : Color.FromArgb(160, 160, 160);
+                            elem.TextAlignment = TileItemContentAlignment.TopRight;
+                            elem.TextLocation = new Point(-8, 6);
+                        }
+                    }
+                    catch { }
+                }
+
+                // pastel background by rating
+                try
+                {
+                    if (rating >= 8.5) e.Item.Appearance.BackColor = Color.FromArgb(235, 248, 236); // pale green
+                    else if (rating >= 7.0) e.Item.Appearance.BackColor = Color.FromArgb(255, 252, 230); // pale yellow
+                    else e.Item.Appearance.BackColor = Color.FromArgb(255, 241, 243); // pale red
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        // Handle tile clicks; if favorite element clicked toggle favorite
+        private void Tile_ItemClick(object sender, TileViewItemClickEventArgs e)
+        {
+            try
+            {
+                var view = sender as TileView;
+                if (view == null) return;
+                int handle = e.Item.RowHandle;
+                if (handle < 0) return;
+
+                // Hit test
+                var pt = this.gridControl1.PointToClient(Cursor.Position);
+                object hi = null;
+                try { hi = view.CalcHitInfo(pt); } catch { hi = null; }
+
+                bool clickedFav = false;
+                try
+                {
+                    if (hi != null)
+                    {
+                        var prop = hi.GetType().GetProperty("Element");
+                        if (prop != null)
+                        {
+                            var elemObj = prop.GetValue(hi);
+                            if (elemObj != null && elemObj.GetType().Name.Contains("TileViewItemElement"))
+                            {
+                                var colProp = elemObj.GetType().GetProperty("Column");
+                                if (colProp != null)
+                                {
+                                    var col = colProp.GetValue(elemObj) as GridColumn;
+                                    if (col != null && string.Equals(col.FieldName, "is_favorite", StringComparison.OrdinalIgnoreCase)) clickedFav = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                if (clickedFav)
+                {
+                    var idObj = view.GetRowCellValue(handle, "id");
+                    if (idObj == null || idObj == DBNull.Value) return;
+                    int id = Convert.ToInt32(idObj);
+                    var favVal = view.GetRowCellValue(handle, "is_favorite");
+                    bool fav = false; try { fav = Convert.ToBoolean(favVal); } catch { fav = false; }
+
+                    var ok = DatabaseHelper.Instance.UpdateFavoriteStatus(id, !fav);
+                    if (ok) LoadData();
+                    return;
+                }
+
+                // default: show details
+                try
+                {
+                    var name = Convert.ToString(view.GetRowCellValue(handle, "movie_name")) ?? string.Empty;
+                    var rating = Convert.ToDouble(view.GetRowCellValue(handle, "rating") ?? 0.0);
+                    ShowMovieFlyout(handle, name, rating, Convert.ToString(view.GetRowCellValue(handle, "plot")) ?? string.Empty, Convert.ToBoolean(view.GetRowCellValue(handle, "is_favorite") ?? false));
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        // Minimal movie popup used by Tile_ItemClick
+        private void ShowMovieFlyout(int rowHandle, string name, double rating, string plot, bool isFav)
+        {
+            try
+            {
+                var dlg = new DevExpress.XtraEditors.XtraForm();
+                dlg.Text = name;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.Width = 420; dlg.Height = 260;
+                var lbl = new DevExpress.XtraEditors.LabelControl();
+                lbl.Text = System.Security.SecurityElement.Escape(name) + "\n\n⭐ " + rating.ToString("0.0");
+                lbl.Dock = DockStyle.Fill;
+                dlg.Controls.Add(lbl);
+                dlg.ShowDialog(this);
+            }
+            catch { }
+        }
+
+        private void EnsureStarImages()
+        {
+            if (_emptyStar != null && _filledStar != null) return;
+            _emptyStar = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(_emptyStar))
+            {
+                g.Clear(Color.Transparent);
+                using var pen = new Pen(Color.FromArgb(140, 140, 140), 1.5f);
+                var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) };
+                g.DrawPolygon(pen, pts);
+            }
+            _filledStar = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(_filledStar))
+            {
+                g.Clear(Color.Transparent);
+                using var brush = new SolidBrush(Color.FromArgb(255, 193, 7));
+                var pts = new PointF[] { new(8,1), new(10.5f,6), new(16,6.5f), new(11.5f,10), new(13,15), new(8,12), new(3,15), new(4.5f,10), new(0,6.5f), new(5.5f,6) };
+                g.FillPolygon(brush, pts);
+                using var pen = new Pen(Color.FromArgb(120, 90, 0), 0.8f);
+                g.DrawPolygon(pen, pts);
+            }
+        }
+
+        private void Form1_KeyDown(object sender, KeyEventArgs e)
+        {
+            try { if (e.KeyCode == Keys.Escape) this.Close(); } catch { }
+        }
+
+        // Designer event handlers (stubs / minimal implementations)
+        private void gridControl1_Click(object sender, EventArgs e)
+        {
+            // no-op for now
+        }
+
+        private void ComboBoxGenres_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi")
+                {
+                    this.gridControl1.DataSource = DatabaseHelper.Instance.GetMovies();
+                }
+                else
+                {
+                    this.gridControl1.DataSource = DatabaseHelper.Instance.GetMoviesByGenre(sel);
+                }
+                try { tileView1.RefreshData(); } catch { }
+            }
+            catch { }
+        }
+
+        private void BtnRecommend_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var sel = comboBoxGenres.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(sel) || sel == "Hepsi")
+                {
+                    XtraMessageBox.Show("Lütfen önce bir tür seçin.", "Bilgi", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                var movie = DatabaseHelper.Instance.GetRandomMovieByGenre(sel, _lastRecommendedId);
+                if (movie == null) { XtraMessageBox.Show("Seçilen türe ait film bulunamadı.", "Bilgi"); return; }
+                _lastRecommendedId = movie.Value.id;
+                XtraMessageBox.Show($"Öneri: {movie.Value.name}\n⭐ {movie.Value.rating:0.0}", "Film Önerisi");
+            }
+            catch { }
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            // ensure data is loaded on form load as well
+            LoadData();
+        }
+    }
+}

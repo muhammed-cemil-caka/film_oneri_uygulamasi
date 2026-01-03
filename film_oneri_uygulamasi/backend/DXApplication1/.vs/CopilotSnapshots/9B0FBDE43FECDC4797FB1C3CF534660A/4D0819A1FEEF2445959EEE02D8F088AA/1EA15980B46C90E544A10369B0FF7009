@@ -1,0 +1,172 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+using Npgsql;
+using System.Configuration;
+using DevExpress.XtraEditors;
+
+namespace DXApplication1
+{
+    public partial class Form1 : DevExpress.XtraBars.Ribbon.RibbonForm
+    {
+        public Form1()
+        {
+            InitializeComponent();
+
+            // 1. Indicator'ı (sol boşluğu) ID sütununa dönüştürmek için hazırlık
+            gridView1.OptionsView.ShowIndicator = true; // Bu sefer True yapıyoruz ki ID yazabilelim
+            gridView1.IndicatorWidth = 40; // Genişliğini ayarla
+            gridView1.OptionsView.ShowGroupPanel = false; // Üstteki gri bant kapalı kalsın
+
+            // 2. Veri yüklendiğinde gerçek ID sütununu gizle ve Indicator'a ID yaz
+            gridControl1.DataSourceChanged += (s, e) => {
+                if (gridView1.Columns.Count > 0)
+                {
+                    // Gerçek 'id' sütununu gizle (zaten Indicator'da göstereceğiz)
+                    if (gridView1.Columns["id"] != null) gridView1.Columns["id"].Visible = false;
+
+                    // Diğer sütunları Türkçeleştir
+                    if (gridView1.Columns["movie_name"] != null) gridView1.Columns["movie_name"].Caption = "Film Adı";
+                    if (gridView1.Columns["genre"] != null) gridView1.Columns["genre"].Caption = "Tür";
+                    if (gridView1.Columns["rating"] != null) gridView1.Columns["rating"].Caption = "Puan";
+                }
+            };
+
+            // 3. O sol taraftaki boşluğa (Indicator) ID numaralarını yazdıran sihirli kod
+            gridView1.CustomDrawRowIndicator += (s, e) => {
+                if (e.Info.IsRowIndicator && e.RowHandle >= 0)
+                {
+                    e.Info.DisplayText = (e.RowHandle + 1).ToString(); // 1, 2, 3 diye numara verir
+                }
+            };
+        }
+
+        private void gridView1_CustomUnboundColumnData(object sender, DevExpress.XtraGrid.Views.Base.CustomColumnDataEventArgs e)
+        {
+            if (e.Column.FieldName == "row_no" && e.IsGetData)
+            {
+                // RowHandle may include group rows; use GetRowHandle
+                var view = sender as DevExpress.XtraGrid.Views.Grid.GridView;
+                if (view != null)
+                {
+                    int visibleIndex = view.GetRowHandle(e.ListSourceRowIndex);
+                    // visibleIndex may be negative for new items; fall back
+                    e.Value = e.ListSourceRowIndex + 1;
+                }
+            }
+        }
+
+        // legacy fetch handler removed
+
+
+        private async void Form1_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                var dt = DatabaseHelper.Instance.GetMovies();
+                this.gridControl1.DataSource = dt;
+                ConfigureGrid(dt);
+
+                // On startup, automatically fetch IMDb ratings for any movies with rating = 0.0
+                try
+                {
+                    // Run on background thread to avoid blocking UI
+                    var updated = await System.Threading.Tasks.Task.Run(() => DatabaseHelper.Instance.UpdateRatingsFromOmdb());
+                    if (updated > 0)
+                    {
+                        // Refresh grid
+                        var newDt = DatabaseHelper.Instance.GetMovies();
+                        this.gridControl1.DataSource = newDt;
+                        ConfigureGrid(newDt);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // don't interrupt startup; show a warning
+                    XtraMessageBox.Show($"Otomatik puan güncellemesi sırasında hata: {ex.Message}", "Uyarı", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veri yüklenirken hata oluştu: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ConfigureGrid(DataTable dt)
+        {
+            try
+            {
+                var gv = this.gridView1;
+                gv.Columns.Clear();
+
+                // Ensure we don't attach the handler multiple times
+                gv.CustomUnboundColumnData -= gridView1_CustomUnboundColumnData;
+                gv.CustomUnboundColumnData += gridView1_CustomUnboundColumnData;
+
+                // Add a stable, continuous row number column (unbound)
+                var colNo = gv.Columns.AddVisible("row_no", "id"); // Changed header from '#' to 'id'
+                colNo.UnboundType = DevExpress.Data.UnboundColumnType.Integer;
+                colNo.OptionsColumn.AllowEdit = false;
+                colNo.Width = 40; // Reduced width for the id column
+                colNo.AppearanceCell.Options.UseTextOptions = true;
+                colNo.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+                colNo.VisibleIndex = 0;
+
+                // Remove the real DB id column
+                if (gv.Columns["id"] != null)
+                {
+                    gv.Columns.Remove(gv.Columns["id"]);
+                }
+
+                // movie_name
+                var colName = gv.Columns.AddVisible("movie_name", "Film Adı (Türkçe)");
+                colName.OptionsColumn.AllowEdit = false;
+                colName.Width = 300;
+
+                // genre
+                var colGenre = gv.Columns.AddVisible("genre", "Tür");
+                colGenre.OptionsColumn.AllowEdit = false;
+                colGenre.Width = 150;
+
+                // rating - center alignment
+                var colRating = gv.Columns.AddVisible("rating", "Puan");
+                colRating.OptionsColumn.AllowEdit = false;
+                colRating.Width = 80;
+                colRating.AppearanceCell.TextOptions.HAlignment = DevExpress.Utils.HorzAlignment.Center;
+
+                // Keep the indicator hidden and prevent automatic column resizing which
+                // can cause numeric id cells to be trimmed and displayed as "...".
+                gv.OptionsView.ShowIndicator = false;
+                gv.OptionsView.ColumnAutoWidth = false;
+            }
+            catch { /* ignore grid config errors */ }
+        }
+
+        // Call this method to test the PostgreSQL connection. It reads the connection string
+        // named "PostgresConnection" from App.config and attempts to open a connection.
+        private void TestPostgresConnection()
+        {
+            var error = DatabaseHelper.Instance.TestConnection();
+            if (error == null)
+            {
+                XtraMessageBox.Show("Bağlantı başarılı.", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                XtraMessageBox.Show($"Bağlantı hatası:\n{error}", "Postgres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void gridControl1_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        // Manual update/progress UI removed
+    }
+}

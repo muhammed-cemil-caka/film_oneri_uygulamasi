@@ -1,0 +1,659 @@
+﻿using System;
+using System.Data;
+using System.Linq;
+using System.Configuration;
+using Npgsql;
+using DevExpress.XtraEditors;
+using System.Windows.Forms;
+
+namespace DXApplication1
+{
+    /// <summary>
+    /// Database helper encapsulating simple read/update operations for the "movies" table.
+    /// Clean, minimal implementation keeping the existing OMDb fallback integration.
+    /// </summary>
+    public sealed class DatabaseHelper
+    {
+        private static readonly Lazy<DatabaseHelper> _instance = new(() => new DatabaseHelper());
+        public static DatabaseHelper Instance => _instance.Value;
+
+        private readonly string _connectionString;
+        // Map of Turkish genre -> English genre (single-word from DB) for reverse lookup when filtering
+        private readonly System.Collections.Generic.Dictionary<string, string> _turkishToEnglishGenre = new(System.StringComparer.OrdinalIgnoreCase);
+
+        private readonly System.Collections.Generic.Dictionary<string, bool> _columnExistsCache = new(System.StringComparer.OrdinalIgnoreCase);
+
+        private DatabaseHelper()
+        {
+            _connectionString = "Host=localhost;Port=5432;Username=postgres;Database=film_db";
+            // Ensure favorite column exists
+            try { EnsureFavoriteColumnExists(); } catch { }
+        }
+
+        // Return plot/overview text for a movie by id (empty string if not available)
+        public string GetMoviePlot(int id)
+        {
+            try
+            {
+                if (!ColumnExists("plot")) return string.Empty;
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT plot FROM movies WHERE id = @id", conn);
+                cmd.Parameters.AddWithValue("@id", id);
+                conn.Open();
+                var res = cmd.ExecuteScalar();
+                if (res == null || res == DBNull.Value) return string.Empty;
+                return Convert.ToString(res) ?? string.Empty;
+            }
+            catch { return string.Empty; }
+        }
+
+        private bool ColumnExists(string columnName)
+        {
+            if (string.IsNullOrWhiteSpace(columnName)) return false;
+            if (_columnExistsCache.TryGetValue(columnName, out var cached)) return cached;
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'movies' AND column_name = @c)", conn);
+                cmd.Parameters.AddWithValue("@c", columnName);
+                conn.Open();
+                var res = cmd.ExecuteScalar();
+                bool exists = false;
+                try { exists = Convert.ToBoolean(res); } catch { exists = false; }
+                _columnExistsCache[columnName] = exists;
+                return exists;
+            }
+            catch { _columnExistsCache[columnName] = false; return false; }
+        }
+
+        // Alias requested by UI: UpdateFavoriteStatus
+        public bool UpdateFavoriteStatus(int movieId, bool isFavorite) => ToggleFavorite(movieId, isFavorite);
+
+        // Return favorite flag for a single movie
+        public bool IsFavorite(int movieId)
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT COALESCE(is_favorite,false) FROM movies WHERE id = @id", conn);
+                cmd.Parameters.AddWithValue("@id", movieId);
+                conn.Open();
+                var res = cmd.ExecuteScalar();
+                if (res == null || res == DBNull.Value) return false;
+                return Convert.ToBoolean(res);
+            }
+            catch { return false; }
+        }
+
+        // Toggle favorite flag for a movie
+        public bool ToggleFavorite(int movieId, bool isFavorite)
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("UPDATE movies SET is_favorite = @f WHERE id = @id", conn);
+                cmd.Parameters.AddWithValue("@f", isFavorite);
+                cmd.Parameters.AddWithValue("@id", movieId);
+                conn.Open();
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (ToggleFavorite): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
+        // Return only favorite movies
+        public DataTable GetFavoriteMovies()
+        {
+            var dt = new DataTable();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                // include plot only if the column exists to avoid errors on older schema
+                string selectPlot = ColumnExists("plot") ? ", plot" : string.Empty;
+                using var cmd = new NpgsqlCommand($"SELECT id, movie_name, genre, COALESCE(rating,0.0) AS rating, COALESCE(is_favorite,false) AS is_favorite{selectPlot} FROM movies WHERE is_favorite = true ORDER BY rating DESC", conn);
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                conn.Open();
+                adapter.Fill(dt);
+                // Translate movie names and genres to Turkish for UI
+                try
+                {
+                    for (int i = 0; i < dt.Rows.Count; i++)
+                    {
+                        var row = dt.Rows[i];
+                        if (dt.Columns.Contains("movie_name") && row["movie_name"] != DBNull.Value)
+                        {
+                            var en = row.Field<string>("movie_name");
+                            var tr = TranslateMovieName(en);
+                            if (!string.IsNullOrWhiteSpace(tr)) row["movie_name"] = tr;
+                        }
+                        if (dt.Columns.Contains("genre") && row["genre"] != DBNull.Value)
+                        {
+                            var g = row.Field<string>("genre");
+                            var trg = TranslateGenreList(g);
+                            if (!string.IsNullOrWhiteSpace(trg)) row["genre"] = trg;
+                        }
+                    }
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (GetFavoriteMovies): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return dt;
+        }
+
+        private void EnsureFavoriteColumnExists()
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("ALTER TABLE movies ADD COLUMN IF NOT EXISTS is_favorite boolean DEFAULT false", conn);
+                conn.Open();
+                cmd.ExecuteNonQuery();
+            }
+            catch { }
+        }
+
+        // Return movies for a specific genre (case-insensitive LIKE), ordered by rating desc
+        public DataTable GetMoviesByGenre(string genre)
+        {
+            var dt = new DataTable();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                // If user selected a Turkish genre, try to map back to the English token used in DB
+                string searchToken = genre ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(searchToken) && _turkishToEnglishGenre.TryGetValue(searchToken, out var eng))
+                {
+                    searchToken = eng;
+                }
+                string selectPlot = ColumnExists("plot") ? ", plot" : string.Empty;
+                using var cmd = new NpgsqlCommand($"SELECT id, movie_name, genre, COALESCE(rating,0.0) AS rating, COALESCE(is_favorite,false) AS is_favorite{selectPlot} FROM movies WHERE genre ILIKE @g ORDER BY rating DESC", conn);
+                cmd.Parameters.AddWithValue("@g", "%" + searchToken + "%");
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                conn.Open();
+                adapter.Fill(dt);
+                // Translate movie names and genres to Turkish for UI
+                try
+                {
+                    for (int i = 0; i < dt.Rows.Count; i++)
+                    {
+                        var row = dt.Rows[i];
+                        if (dt.Columns.Contains("movie_name") && row["movie_name"] != DBNull.Value)
+                        {
+                            var en = row.Field<string>("movie_name");
+                            var tr = TranslateMovieName(en);
+                            if (!string.IsNullOrWhiteSpace(tr)) row["movie_name"] = tr;
+                        }
+                        if (dt.Columns.Contains("genre") && row["genre"] != DBNull.Value)
+                        {
+                            var g = row.Field<string>("genre");
+                            var trg = TranslateGenreList(g);
+                            if (!string.IsNullOrWhiteSpace(trg)) row["genre"] = trg;
+                        }
+                    }
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (GetMoviesByGenre): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return dt;
+        }
+
+        // Return a random movie tuple (id,name,rating) for the given genre, or null if none
+        public (int id, string name, double rating)? GetRandomMovieByGenre(string genre, int? excludeId = null)
+        {
+            try
+            {
+                var list = new System.Collections.Generic.List<(int id, string name, double rating)>();
+                using var conn = new NpgsqlConnection(_connectionString);
+                // If user selected a Turkish genre label, try to map it back to the English token used in the DB
+                string searchToken = genre ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(searchToken) && _turkishToEnglishGenre.TryGetValue(searchToken, out var eng))
+                {
+                    searchToken = eng;
+                }
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, COALESCE(rating,0.0) AS rating FROM movies WHERE genre ILIKE @g", conn);
+                cmd.Parameters.AddWithValue("@g", "%" + searchToken + "%");
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    int id = reader.GetInt32(0);
+                    if (excludeId.HasValue && excludeId.Value == id) continue;
+                    string name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                    // Prefer Turkish translation when available
+                    var tr = TranslateMovieName(name);
+                    if (!string.IsNullOrWhiteSpace(tr)) name = tr;
+                    double rating = reader.IsDBNull(2) ? 0.0 : reader.GetDouble(2);
+                    list.Add((id, name, rating));
+                }
+
+                if (list.Count == 0) return null;
+                var rnd = new Random();
+                var idx = rnd.Next(list.Count);
+                return list[idx];
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (GetRandomMovieByGenre): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return null;
+            }
+        }
+
+        // Return distinct individual genres from the movies table (splits comma-separated genre lists)
+        public System.Collections.Generic.List<string> GetDistinctGenres()
+        {
+            var list = new System.Collections.Generic.List<string>();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                // Split comma-separated genre strings and return distinct trimmed values
+                using var cmd = new NpgsqlCommand(@"SELECT DISTINCT trim(g) FROM (SELECT unnest(string_to_array(genre, ',')) AS g FROM movies WHERE genre IS NOT NULL) t ORDER BY 1", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                while (reader.Read())
+                {
+                    if (!reader.IsDBNull(0))
+                    {
+                        var g = reader.GetString(0);
+                        if (string.IsNullOrWhiteSpace(g)) continue;
+                        // translate single genre to Turkish (if available)
+                        var tr = TranslateGenreList(g);
+                        var trSingle = string.IsNullOrWhiteSpace(tr) ? g : tr;
+                        // store mapping both ways for robustness
+                        if (!_turkishToEnglishGenre.ContainsKey(trSingle)) _turkishToEnglishGenre[trSingle] = g;
+                        if (!_turkishToEnglishGenre.ContainsKey(g)) _turkishToEnglishGenre[g] = g;
+                        // ensure unique entries returned (Turkish label)
+                        if (!seen.Contains(trSingle)) { list.Add(trSingle); seen.Add(trSingle); }
+                    }
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        // Returns all movies for display in the grid
+        public DataTable GetMovies()
+        {
+            var dt = new DataTable();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                // Select actual id, favorite flag and include plot only if column exists
+                string selectPlot = ColumnExists("plot") ? ", plot" : string.Empty;
+                using var cmd = new NpgsqlCommand($"SELECT id, movie_name, genre, COALESCE(rating,0.0) AS rating, COALESCE(is_favorite,false) AS is_favorite{selectPlot} FROM movies ORDER BY id", conn);
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                conn.Open();
+                adapter.Fill(dt);
+
+                // Append Turkish translations for genre only
+                try
+                {
+                    for (int i = 0; i < dt.Rows.Count; i++)
+                    {
+                        var row = dt.Rows[i];
+                        // Translate movie_name when mapping exists
+                        if (row.Table.Columns.Contains("movie_name") && row["movie_name"] != DBNull.Value)
+                        {
+                            var en = row.Field<string>("movie_name");
+                            var tr = TranslateMovieName(en);
+                            if (!string.IsNullOrWhiteSpace(tr)) row["movie_name"] = tr;
+                        }
+
+                        var genre = row.Table.Columns.Contains("genre") ? row.Field<string>("genre") : null;
+                        var trGenre = TranslateGenreList(genre);
+                        // Prefer Turkish-only display when translation exists
+                        if (!string.IsNullOrWhiteSpace(trGenre))
+                            row["genre"] = trGenre;
+                        else if (!string.IsNullOrWhiteSpace(genre))
+                            row["genre"] = genre;
+                    }
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı bağlantı hatası:\n{ex}", "Veritabanı Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return dt;
+        }
+
+        // Simple connection test
+        public string? TestConnection()
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+                conn.Close();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.ToString();
+            }
+        }
+
+        // Get movies that currently have no rating (NULL or 0.0)
+        public System.Collections.Generic.List<(int id, string name, int? year)> GetMoviesWithZeroRating()
+        {
+            var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE rating IS NULL OR rating = 0.0 ORDER BY id", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    int id = reader.GetInt32(0);
+                    string name = reader.GetString(1);
+                    int? year = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+                    list.Add((id, name, year));
+                }
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (listeleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return list;
+        }
+
+        // Update a single movie's rating
+        public bool UpdateMovieRating(int id, decimal rating)
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("UPDATE movies SET rating = @r WHERE id = @id", conn);
+                cmd.Parameters.AddWithValue("@r", rating);
+                cmd.Parameters.AddWithValue("@id", id);
+                conn.Open();
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"Veritabanı hatası (güncelleme): {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
+        // Update ratings for all movies that have no rating using OMDb client with fallback.
+        // Returns number of updated rows, or -1 on error.
+        public int UpdateRatingsFromOmdb()
+        {
+            var apiKey = ConfigurationManager.AppSettings["OmdbApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                XtraMessageBox.Show("OMDb API anahtarı App.config içinde ayarlı değil.", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return -1;
+            }
+
+            try
+            {
+                var client = new OmdbClient(apiKey);
+                var zeros = GetMoviesWithZeroRating();
+                int updated = 0;
+
+                foreach (var (id, name, year) in zeros)
+                {
+                    // Use enhanced fallback lookup that tries multiple strategies
+                    var rating = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingWithFallbackAsync(name, year)).GetAwaiter().GetResult();
+                    if (rating != null && rating > 0)
+                    {
+                        decimal safeRating = Convert.ToDecimal(rating, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(id, safeRating)) updated++;
+                    }
+                }
+
+                return updated;
+            }
+
+        // Return list of movies whose names do not have a Turkish mapping in our dictionary
+        public System.Collections.Generic.List<(int id, string name)> GetUntranslatedMovieTitles()
+        {
+            var list = new System.Collections.Generic.List<(int id, string name)>();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name FROM movies ORDER BY id", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    int id = reader.IsDBNull(0) ? -1 : reader.GetInt32(0);
+                    string name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    // If TranslateMovieName returns empty, we don't have a Turkish mapping for this name
+                    var tr = TranslateMovieName(name);
+                    if (string.IsNullOrWhiteSpace(tr)) list.Add((id, name));
+                }
+            }
+            catch { }
+            return list;
+        }
+            catch (Exception ex)
+            {
+                XtraMessageBox.Show($"OMDb güncelleme hatası:\n{ex}", "OMDb Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return -1;
+            }
+        }
+
+        // Wrapper for backward compatibility
+        public int RetryZeroRatingsFromOmdb() => UpdateRatingsFromOmdb();
+
+        // Targeted fixer for common Indiana Jones entries (exposed publicly)
+        public int FixIndianaJonesRatingsPublic()
+        {
+            int updated = 0;
+            try
+            {
+                var client = new OmdbClient(ConfigurationManager.AppSettings["OmdbApiKey"]);
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, release_year FROM movies WHERE (movie_name ILIKE '%iniana%' OR movie_name ILIKE '%indiana jones%') AND (rating IS NULL OR rating = 0.0)", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<(int id, string name, int? year)>();
+                while (reader.Read()) list.Add((reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2)));
+                reader.Close();
+
+                var franchise = new[] { ("Raiders of the Lost Ark", 1981), ("Indiana Jones and the Temple of Doom", 1984), ("Indiana Jones and the Last Crusade", 1989), ("Indiana Jones and the Kingdom of the Crystal Skull", 2008) };
+                foreach (var item in list)
+                {
+                    double? found = null;
+                    foreach (var f in franchise)
+                    {
+                        var r = System.Threading.Tasks.Task.Run(() => client.GetImdbRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r == null) r = System.Threading.Tasks.Task.Run(() => client.SearchAndGetRatingAsync(f.Item1, f.Item2)).GetAwaiter().GetResult();
+                        if (r != null && r > 0) { found = r; break; }
+                    }
+
+                    if (found != null)
+                    {
+                        decimal safe = Convert.ToDecimal(found.Value, System.Globalization.CultureInfo.InvariantCulture);
+                        if (UpdateMovieRating(item.id, safe)) updated++;
+                    }
+                }
+            }
+            catch { }
+            return updated;
+        }
+
+        // Translate a movie name to Turkish when a mapping exists. Returns empty string when no translation.
+        // Public wrapper to allow UI to request Turkish movie name translation
+        public string GetTurkishMovieName(string? name) => TranslateMovieName(name);
+
+        private string TranslateMovieName(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+            var map = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "The Shawshank Redemption", "Esaretin Bedeli" },
+                { "The Godfather", "Baba" },
+                { "The Dark Knight", "Kara Şövalye" },
+                { "Pulp Fiction", "Ucuz Roman" },
+                { "Schindler's List", "Schindler'in Listesi" },
+                { "Fight Club", "Dövüş Kulübü" },
+                { "Forrest Gump", "Forrest Gump" },
+                { "Inception", "Başlangıç" },
+                { "The Matrix", "Matrix" },
+                { "Goodfellas", "Sıkı Dostlar" },
+                { "The Lion King", "Aslan Kral" },
+                { "Back to the Future", "Geleceğe Dönüş" },
+                { "The Lord of the Rings: The Return of the King", "Yüzüklerin Efendisi: Kralın Dönüşü" },
+                { "The Lord of the Rings: The Fellowship of the Ring", "Yüzüklerin Efendisi: Yüzük Kardeşliği" },
+                { "The Lord of the Rings: The Two Towers", "Yüzüklerin Efendisi: İki Kule" },
+                { "Interstellar", "Yıldızlararası" },
+                { "Gladiator", "Gladyatör" },
+                { "Saving Private Ryan", "Er Ryan'ı Kurtarmak" },
+                { "The Green Mile", "Yeşil Yol" },
+                { "Se7en", "Yedi" },
+                { "Seven", "Yedi" },
+                { "The Silence of the Lambs", "Kuzuların Sessizliği" },
+                { "Titanic", "Titanic" },
+                { "Avatar", "Avatar" },
+                { "The Departed", "Köstebek" },
+                { "Whiplash", "Whiplash" },
+                { "The Prestige", "Prestij" },
+                { "Memento", "Akıl Defteri" },
+                { "Django Unchained", "Zincirsiz Django" },
+                { "The Social Network", "Sosyal Ağ" },
+                { "Parasite", "Parazit" },
+                { "La La Land", "Aşıklar Şehri" },
+                { "The Usual Suspects", "Olağan Şüpheliler" },
+                { "Toy Story", "Oyuncak Hikayesi" },
+                { "WALL-E", "WALL-E" },
+                { "The Incredibles", "İnanılmaz Aile" },
+                { "Finding Nemo", "Kayıp Balık Nemo" },
+                { "Spirited Away", "Ruhların Kaçışı" },
+                { "Princess Mononoke", "Prenses Mononoke" },
+                { "Oldboy", "Oldboy" },
+                { "Amélie", "Amélie" },
+                { "Casablanca", "Casablanca" },
+                { "City of God", "Tanrılar Şehri" },
+                { "A Clockwork Orange", "Otomatik Portakal" },
+                { "The Great Dictator", "Büyük Diktatör" },
+                { "Once Upon a Time in the West", "Batıda Bir Zamanlar" },
+                { "Once Upon a Time in America", "Amerika'da Bir Zamanlar" },
+                { "Blade Runner", "Bıçak Sırtı" },
+                { "Psycho", "Psikopat" },
+                { "The Shining", "Cinnet" },
+                { "Alien", "Yaratık" },
+                { "Aliens", "Yaratıklar" },
+                { "Rocky", "Rocky" },
+                { "Raiders of the Lost Ark", "Kayıp Ark'ın Yağmacıları" },
+                { "Terminator 2: Judgment Day", "Terminatör 2: Mahşer Günü" },
+                { "The Hobbit: An Unexpected Journey", "Hobbit: Beklenmedik Yolculuk" },
+                { "Joker", "Joker" },
+                { "The Wolf of Wall Street", "Para Avcısı" },
+                { "Slumdog Millionaire", "Milyoner" },
+                { "The Grand Budapest Hotel", "Büyük Budapeşte Oteli" },
+                { "Moonlight", "Ay Işığı" },
+                { "Black Swan", "Siyah Kuğu" },
+                { "12 Angry Men", "12 Öfkeli Adam" },
+                { "The Pianist", "Piyanist" },
+                { "Cinema Paradiso", "Cennet Sineması" },
+                { "The Intouchables", "Can Dostum" },
+                { "A Beautiful Mind", "Akıl Oyunları" },
+                { "The King's Speech", "Kralın Konuşması" },
+                { "No Country for Old Men", "İhtiyarlara Yer Yok" },
+                { "There Will Be Blood", "Kan Dökülecek" },
+                { "The Revenant", "Diriliş" },
+                { "Mad Max: Fury Road", "Çılgın Max: Öfkeli Yollar" },
+                { "The Avengers", "Yenilmezler" },
+                { "Avengers: Endgame", "Yenilmezler: Oyun Sonu" },
+                { "Avengers: Infinity War", "Yenilmezler: Sonsuzluk Savaşı" },
+                { "Iron Man", "Demir Adam" },
+                { "Captain America: The First Avenger", "Kaptan Amerika: İlk Yenilmez" },
+                { "Guardians of the Galaxy", "Galaksinin Koruyucuları" },
+                { "Star Wars: A New Hope", "Yıldız Savaşları: Yeni Bir Umut" },
+                { "Star Wars: The Empire Strikes Back", "Yıldız Savaşları: İmparator" }
+            };
+            if (map.TryGetValue(name.Trim(), out var tr)) return tr;
+            return string.Empty;
+        }
+
+        // Translate comma-separated genre list into Turkish equivalents
+        private string TranslateGenreList(string? genres)
+        {
+            if (string.IsNullOrWhiteSpace(genres)) return string.Empty;
+            var map = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Comedy", "Komedi" },
+                { "Drama", "Dram" },
+                { "Action", "Aksiyon" },
+                { "Romance", "Romantik" },
+                { "Thriller", "Gerilim" },
+                { "Horror", "Korku" },
+                { "Documentary", "Belgesel" },
+                { "Animation", "Animasyon" },
+                { "Adventure", "Macera" },
+                { "Fantasy", "Fantastik" },
+                { "Sci-Fi", "Bilim Kurgu" },
+                { "Science Fiction", "Bilim Kurgu" },
+                { "Biography", "Biyografi" },
+                { "History", "Tarih" },
+                { "Crime", "Suç" },
+                { "Mystery", "Gizem" },
+                { "Family", "Aile" },
+                { "Music", "Müzik" }
+            };
+
+            var parts = genres.Split(new[] { ',', '/' }, StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim()).ToArray();
+            var translated = new System.Collections.Generic.List<string>();
+            foreach (var p in parts)
+            {
+                if (map.TryGetValue(p, out var tr)) translated.Add(tr);
+            }
+            return translated.Count == 0 ? string.Empty : string.Join(", ", translated);
+        }
+
+        // Update database movie_name fields to Turkish equivalents when a mapping exists.
+        // Returns number of rows updated.
+        public int ApplyTurkishNamesToDatabase()
+        {
+            int updated = 0;
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name FROM movies", conn);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<(int id, string name)>();
+                while (reader.Read())
+                {
+                    int id = reader.GetInt32(0);
+                    string name = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                    list.Add((id, name));
+                }
+                reader.Close();
+
+                foreach (var item in list)
+                {
+                    try
+                    {
+                        var tr = TranslateMovieName(item.name);
+                        if (!string.IsNullOrWhiteSpace(tr) && !string.Equals(tr, item.name, StringComparison.Ordinal))
+                        {
+                            using var upd = new NpgsqlCommand("UPDATE movies SET movie_name = @name WHERE id = @id", conn);
+                            upd.Parameters.AddWithValue("@name", tr);
+                            upd.Parameters.AddWithValue("@id", item.id);
+                            if (upd.ExecuteNonQuery() > 0) updated++;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return updated;
+        }
+    }
+}

@@ -1,0 +1,63 @@
+﻿using System;
+using System.Data;
+using System.Configuration;
+using Npgsql;
+using DevExpress.XtraEditors;
+using System.Windows.Forms;
+
+namespace DXApplication1
+{
+    // Singleton DatabaseHelper using Npgsql
+    public sealed class DatabaseHelper
+    {
+        private static readonly Lazy<DatabaseHelper> _instance = new(() => new DatabaseHelper());
+        public static DatabaseHelper Instance => _instance.Value;
+
+        private readonly string _connectionString;
+
+        private DatabaseHelper()
+        {
+            // Use the requested hard-coded connection string
+            _connectionString = "Host=localhost;Port=5432;Username=postgres;Password=SIFRE;Database=film_db";
+        }
+
+        // Returns all movies from Movies table as a DataTable
+        public DataTable GetMovies()
+        {
+            var dt = new DataTable();
+
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                using var cmd = new NpgsqlCommand("SELECT id, movie_name, genre, rating FROM Movies ORDER BY id", conn);
+                using var adapter = new NpgsqlDataAdapter(cmd);
+                // open explicitly to catch connection issues early
+                conn.Open();
+                adapter.Fill(dt);
+            }
+            catch (Exception ex)
+            {
+                // Show full exception to help troubleshooting (includes inner exceptions and stack trace)
+                XtraMessageBox.Show($"Veritabanı bağlantı hatası:\n{ex}", "Veritabanı Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            return dt;
+        }
+
+        // Attempts to open a connection and returns null on success or the error message on failure
+        public string? TestConnection()
+        {
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+                conn.Close();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.ToString();
+            }
+        }
+    }
+}
